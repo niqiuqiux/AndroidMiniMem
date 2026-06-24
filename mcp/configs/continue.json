@@ -1,0 +1,19 @@
+{
+  "_comment": "Continue (VS Code / JetBrains 插件) — 合并到 ~/.continue/config.json 的 experimental.modelContextProtocolServers",
+  "experimental": {
+    "modelContextProtocolServers": [
+      {
+        "transport": {
+          "type": "stdio",
+          "command": "python",
+          "args": ["-m", "amem_mcp"],
+          "env": {
+            "PYTHONPATH": "D:/AndroidMEM/AndroidMiniMem/mcp",
+            "AMEM_IPC_HOST": "127.0.0.1",
+            "AMEM_IPC_PORT": "28100"
+          }
+        }
+      }
+    ]
+  }
+}

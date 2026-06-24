@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "minimem": {
+      "command": "python",
+      "args": ["-m", "amem_mcp"],
+      "env": {
+        "PYTHONPATH": "D:/AndroidMEM/AndroidMiniMem/mcp"
+      }
+    }
+  }
+}

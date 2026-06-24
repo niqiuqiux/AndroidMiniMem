@@ -1,0 +1,47 @@
+# ============================================================================
+# AndroidMiniMem .gitignore
+# ============================================================================
+
+# ---- 构建目录 ----
+build/
+build_test/
+out/
+
+# ---- 构建产物（按子项目锚定，避免误伤 third_party 下的预编译依赖）----
+/engine/bin/
+/engine/lib/
+/gui/bin/
+/gui/lib/
+
+# ---- 编译中间文件 ----
+*.o
+*.obj
+*.pdb
+*.ilk
+*.exp
+
+# ---- 缓存 / 编辑器 / 工具 ----
+.cache/
+.vscode/
+.idea/
+.claude/
+nul
+*.user
+
+# ---- Python (mcp) ----
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# ---- 运行时生成 ----
+*.log
+imgui.ini
+CrashDumps/
+
+# 说明：
+#   third_party/LuaJIT 下的 lua51.lib / lua51.dll 是构建必需的预编译依赖，
+#   已刻意保留跟踪（未被上面任何规则忽略）。
+#   gui/imgui 由 git submodule 管理（见 .gitmodules）。

@@ -1,0 +1,57 @@
+# MiniMem Socket 通信协议
+
+精简版后端（`socket_server`）的二进制通信协议。客户端通过 TCP Socket 连接，每条命令以**单字节 opcode** 开头，后跟对应的参数结构体/数据块。所有命令由 `CEServer.cpp` 的 `DispatchCommand_V2` 分发。
+
+> 本精简版**不含**数据搜索 / 指针扫描 / 冻结 / SO注入 / 远程mmap / 线程上下文 / CE风格调试事件 / 旧式快照(Process32/Module32) 等命令。
+
+## 1. 字节序与对齐
+
+- 字节序与平台一致（ARM64 小端）。
+- 结构体定义见 `ceserver.h`，含 `std::vector` 的结构体在 pack 之外，其余在 `#pragma pack(1)` 内。
+- 命令字节 + 结构体顺序必须严格一致，否则解析失败。
+
+## 2. 命令字一览
+
+| 命令宏 | opcode | 功能 | 参数/返回 |
+|--------|--------|------|-----------|
+| CMD_GETVERSION | 0 | 获取服务端版本 | 返回 `CeVersion` + 版本字符串 |
+| CMD_CLOSECONNECTION | 1 | 关闭当前连接 | 无返回 |
+| CMD_TERMINATESERVER | 2 | 关闭服务端 | 无返回，触发优雅退出 |
+| CMD_GETMEMTYPE | 3 | 查询当前读写模式（内核切换状态） | 返回: uint8 (0:null 1:io 2:syscall 3:kernel 4:syshook) |
+| CMD_INITRWDRIVER | 4 | 初始化内核读写驱动并热切换 g_memIO | 参数: 授权卡密字符串；返回: 结果码/卡密时间 |
+| CMD_OPENPROCESS | 5 | 打开进程，返回句柄 | 参数: int pid；返回: int handle |
+| CMD_CLOSEHANDLE | 6 | 关闭句柄 | 参数: int handle；返回: int |
+| CMD_GETPROCESSLIST | 7 | 获取进程列表 | 返回: int 进程数 + N×(pid/名长 + 进程名) |
+| CMD_GETMODULELIST | 8 | 获取模块列表 | 返回: int 模块数 + N×(`CeModuleListEntry` + 模块名) |
+| CMD_READPROCESSMEMORY | 9 | 读进程内存 | 参数: `CeReadProcessMemoryInput`；返回: `CeReadProcessMemoryOutput` + 数据 |
+| CMD_WRITEPROCESSMEMORY | 10 | 写进程内存 | 参数: `CeWriteProcessMemoryInput` + 数据；返回: `CeWriteProcessMemoryOutput` |
+| CMD_READBRATCHMEMORY | 11 | 批量读取（按页返回有效数据） | 参数: `CeReadBratchMemory`；返回: N×`CeReadBratchMemoryOutput` |
+| CMD_READBRATCHADDR | 12 | 批量按地址读取 | 参数: 地址/大小数组；返回: 每地址对应数据 |
+| CMD_KERNEL_SETBREAKPOINT | 13 | 设置硬件断点 | 参数: 地址/类型/长度；返回: int(断点句柄或错误码) |
+| CMD_KERNEL_REMOVEBREAKPOINT | 14 | 删除硬件断点 | 参数: 断点地址；返回: int |
+| CMD_KERNEL_SUSPENDBREAKPOINT | 15 | 暂停硬件断点 | 参数: 断点地址；返回: int |
+| CMD_KERNEL_RESUMEBREAKPOINT | 16 | 恢复硬件断点 | 参数: 断点地址；返回: int |
+| CMD_KERNEL_READHWBPINFO | 17 | 读取硬件断点命中记录 | 返回: 命中总数 + N×`HW_HIT_INFO` |
+| CMD_SYMBOL_INIT | 18 | 初始化模块符号表 | 参数: `CeSymbolInitInput`；返回: `CeSymbolInitOutput` |
+| CMD_SYMBOL_GETLIST | 19 | 分页获取符号列表 | 参数: `CeGetSymbolListInput`；返回: `CeGetSymbolListOutput` + N×(`CeSymbolEntry`+名称) |
+| CMD_SYMBOL_FIND | 20 | 按名称查找 ELF 符号 | 参数: `CeFindSymbolInput` + 名称；返回: `CeFindSymbolOutput` |
+
+## 3. 内核切换
+
+`CMD_INITRWDRIVER` 是内核切换的入口：服务端尝试通过 anon_fd 连接已加载的内核驱动，或用 `finit_module` 加载 `Mem.ko`（5 系另需 `CFI.ko`），成功后把全局内存读写实现 `g_memIO` 从默认的 `AndroidMemorySys`（syscall 模式）热替换为 `AndroidMemKernel`（内核模式）。`CMD_GETMEMTYPE` 查询当前所处模式。
+
+## 4. 典型流程
+
+1. `CMD_GETVERSION` → 校验版本
+2. `CMD_GETMEMTYPE` / `CMD_INITRWDRIVER` → 查询 / 切换读写模式
+3. `CMD_GETPROCESSLIST` → 选进程 → `CMD_OPENPROCESS` 取句柄
+4. `CMD_GETMODULELIST` → 取模块基址
+5. `CMD_READPROCESSMEMORY` / `CMD_WRITEPROCESSMEMORY` / `CMD_READBRATCHMEMORY` → 读写内存
+6. `CMD_KERNEL_SETBREAKPOINT` → 下断点 → `CMD_KERNEL_READHWBPINFO` 轮询命中
+7. `CMD_SYMBOL_INIT` → `CMD_SYMBOL_FIND` / `CMD_SYMBOL_GETLIST` → 解析 ELF 符号
+
+## 5. 错误处理
+
+- 未实现 / 未知命令落入 `default` 分支（不响应或返回错误）。
+- 客户端需检查每次 Send / Receive 的返回值，确保数据完整。
+- 硬件断点依赖内核驱动支持，需 root。

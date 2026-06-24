@@ -1,0 +1,15 @@
+{
+  "_comment": "Cursor — 放置于 ~/.cursor/mcp.json 或项目 .cursor/mcp.json",
+  "_install": "推荐: pip install -e D:/AndroidMEM/AndroidMiniMem/mcp，然后 command 改为 amem-mcp 并删除 args",
+  "mcpServers": {
+    "amem": {
+      "command": "python",
+      "args": ["-m", "amem_mcp"],
+      "env": {
+        "PYTHONPATH": "D:/AndroidMEM/AndroidMiniMem/mcp",
+        "AMEM_IPC_HOST": "127.0.0.1",
+        "AMEM_IPC_PORT": "28100"
+      }
+    }
+  }
+}

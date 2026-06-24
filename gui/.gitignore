@@ -1,0 +1,12 @@
+build
+.cache
+bin/CrashDumps
+.claude
+nul
+.vscode
+bin/imgui.ini
+bin/ImGuiProject.pdb
+bin/ai_config.json
+bin/ai_settings.json
+bin/ai_sessions
+.kiro

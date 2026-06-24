@@ -1,0 +1,53 @@
+#pragma once
+
+// 此文件由 CMake 自动生成，请勿手动修改
+
+// 项目版本信息
+#define PROJECT_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define PROJECT_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define PROJECT_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define PROJECT_VERSION "@PROJECT_VERSION@"
+
+// 协议版本信息
+#define PROTOCOL_VERSION_MAJOR @PROTOCOL_VERSION_MAJOR@
+#define PROTOCOL_VERSION_MINOR @PROTOCOL_VERSION_MINOR@
+#define PROTOCOL_VERSION_PATCH @PROTOCOL_VERSION_PATCH@
+#define PROTOCOL_VERSION "@PROTOCOL_VERSION@"
+
+// 构建信息
+#define BUILD_DATE "@BUILD_DATE@"
+#define BUILD_TIME "@BUILD_TIME@"
+#define GIT_COMMIT_HASH "@GIT_COMMIT_HASH@"
+#define GIT_BRANCH "@GIT_BRANCH@"
+
+// 编译器信息
+#define COMPILER_ID "@CMAKE_CXX_COMPILER_ID@"
+#define COMPILER_VERSION "@CMAKE_CXX_COMPILER_VERSION@"
+
+namespace version {
+
+// 获取完整版本字符串
+inline const char* getVersionString() {
+    return PROJECT_VERSION;
+}
+
+// 获取协议版本字符串
+inline const char* getProtocolVersion() {
+    return PROTOCOL_VERSION;
+}
+
+// 获取构建时间
+inline const char* getBuildDateTime() {
+    return BUILD_DATE " " BUILD_TIME;
+}
+
+// 版本号比较
+inline int compareVersion(int major, int minor, int patch) {
+    if (PROJECT_VERSION_MAJOR != major)
+        return PROJECT_VERSION_MAJOR - major;
+    if (PROJECT_VERSION_MINOR != minor)
+        return PROJECT_VERSION_MINOR - minor;
+    return PROJECT_VERSION_PATCH - patch;
+}
+
+} // namespace version

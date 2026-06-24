@@ -1,0 +1,65 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 18,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "默认配置",
+      "description": "MiniMem 默认构建（仅 Socket 接口，Release）",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_SOCKET_INTERFACE": "ON",
+        "ENABLE_OBFUSCATION": "OFF",
+        "ENABLE_STRIP": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "调试配置",
+      "description": "调试构建（不混淆，保留符号）",
+      "inherits": "default",
+      "binaryDir": "${sourceDir}/build/debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ENABLE_OBFUSCATION": "OFF",
+        "ENABLE_STRIP": "OFF"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "发布配置",
+      "description": "发布构建（剥离符号）",
+      "inherits": "default",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "ENABLE_STRIP": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "default",
+      "displayName": "默认构建",
+      "configurePreset": "default",
+      "jobs": 0
+    },
+    {
+      "name": "debug",
+      "displayName": "调试构建",
+      "configurePreset": "debug",
+      "jobs": 0
+    },
+    {
+      "name": "release",
+      "displayName": "发布构建",
+      "configurePreset": "release",
+      "jobs": 0
+    }
+  ]
+}
