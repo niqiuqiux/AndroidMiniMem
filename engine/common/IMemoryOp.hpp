@@ -33,6 +33,10 @@ public:
         void* lpBuffer,
         size_t nSize,
         size_t* lpNumberOfBytesRead = NULL) = 0;
+    // 【连续前缀契约】从 address 起连续写入，遇到首个不可写页即停止：
+    //   - 返回值 = 连续成功写入的字节数；< len 表示部分写入（[0,返回值) 已写、其余未写）；
+    //   - 写入是破坏性操作：部分写入已留下副作用，调用方据返回值重试剩余或如实上报，
+    //     绝不能把"部分写入"当作"未写入"。
     virtual size_t Write(uintptr_t address, const void* buffer, size_t len) const = 0;
     
     // 进程信息

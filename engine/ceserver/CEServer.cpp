@@ -519,6 +519,11 @@ int DispatchCommand_V2(Ioserver *IOserver, unsigned char command) {
       if (!IOserver->Send(&o.addr, sizeof(uint64_t))) {
         break;
       }
+      // 每条带有效长度前缀（连续可读字节数），消除批量按址读的多页歧义
+      uint32_t vlen = static_cast<uint32_t>(o.data.size());
+      if (!IOserver->Send(&vlen, sizeof(vlen))) {
+        break;
+      }
       if (!o.data.empty() && !IOserver->Send(o.data.data(), o.data.size())) {
         break;
       }

@@ -786,8 +786,10 @@ int CApi::ReadBratchAddr(HANDLE hProcess,std::vector<CeReadBratchAddr> &input,st
 		CeReadBratchAddrOutput o;
 		o.addr = i.addr;
 		if (i.size > 0) {
-			o.data.resize(i.size, 0);
-			g_memIO->Read(i.addr, o.data.data(), i.size);
+			o.data.resize(i.size);
+			// 连续前缀语义：data 截到实际连续可读长度，调用方据 data.size() 判断有效字节
+			size_t bread = g_memIO->Read(i.addr, o.data.data(), i.size);
+			o.data.resize(bread);
 		}
 		output.push_back(std::move(o));
 	}

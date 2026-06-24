@@ -224,15 +224,31 @@ bool GetModuleBaseByName(const std::string &moduleName, uint64_t &outBase, PortT
     std::vector<ModuleInfoItem> mods;
     if (!FetchModuleList(mods, port))
         return false;
+
+    // 一个模块通常有多个段(r-x/r--/rw-)，加载基址=其中最小的那个(ELF 头所在段)。
+    // 优先按 basename 精确匹配，避免 "libc.so" 误命中 "libc.so.6" 等子串；
+    // 若无精确匹配，回退到子串匹配（兼容传入完整路径/部分名）。同样取最小基址。
+    uint64_t exactBase = UINT64_MAX, subBase = UINT64_MAX;
+    bool exact = false, sub = false;
     for (const auto &m : mods) {
-        if (m.name.find(moduleName) != std::string::npos) {
-            outBase = m.base;
-            return true;
+        std::string bn = m.name;
+        size_t slash = bn.find_last_of("/\\");
+        if (slash != std::string::npos)
+            bn = bn.substr(slash + 1);
+        if (bn == moduleName) {
+            exact = true;
+            if (m.base < exactBase) exactBase = m.base;
+        } else if (m.name.find(moduleName) != std::string::npos) {
+            sub = true;
+            if (m.base < subBase) subBase = m.base;
         }
     }
+    if (exact) { outBase = exactBase; return true; }
+    if (sub)   { outBase = subBase;  return true; }
     return false;
 }
 
+// 本项目仅支持 arm64，指针恒为 8 字节小端
 static bool read_u64(uint64_t address, uint64_t &value, PortType port) {
     std::vector<unsigned char> buf;
     if (!ReadProcessMemoryBytes(address, 8, buf, port))

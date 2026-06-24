@@ -732,6 +732,18 @@ static std::vector<unsigned char> HexToBytes(const std::string& hex) {
 }
 
 
+// 断点失败时：若当前不在内核读写模式，给出可操作的明确提示（硬件断点依赖内核驱动）
+static json breakpointFailure(const char* genericMsg) {
+    int memType = 0;
+    if (GetMemType(memType) && memType != MemType_Kernel) {
+        return {{"success", false},
+                {"error", std::string("断点功能需要内核读写模式(当前模式 ") +
+                          std::to_string(memType) +
+                          ")，请先调用 init_driver 切换到内核模式"}};
+    }
+    return {{"success", false}, {"error", genericMsg}};
+}
+
 static uint64_t ParseAddress(const json& params, const std::string& key) {
     auto& v = params.at(key);
     if (v.is_string()) {
@@ -902,8 +914,19 @@ void IpcServer::RegisterBuiltinMethods() {
             return {{"success", false}, {"error", "write data exceeds IPC limit"}};
         }
         uint32_t size = (uint32_t)data.size();
-        if (!WriteProcessMemoryBytes(addr, size, data))
-            return {{"success", false}, {"error", "写入内存失败"}};
+        int32_t written = 0;
+        if (!WriteProcessMemoryBytes(addr, size, data, PORT_MAIN, &written)) {
+            // 三态：完全失败 vs 部分写入（已产生副作用，不可当作未写入）
+            if (written > 0) {
+                std::ostringstream oss;
+                oss << "部分写入：仅连续写入 " << written << "/" << size
+                    << " 字节（已修改目标内存，剩余部分因不可写中断）";
+                return {{"success", false}, {"error", oss.str()},
+                        {"result", {{"written", written}}}};
+            }
+            return {{"success", false}, {"error", "写入内存失败"},
+                    {"result", {{"written", 0}}}};
+        }
         return {{"success", true}, {"result", {{"written", (int)size}}}};
     });
 
@@ -958,7 +981,7 @@ void IpcServer::RegisterBuiltinMethods() {
             bpSize = 4;
         }
         if (!SetKernelBreakpoint(addr, bpType, bpSize))
-            return {{"success", false}, {"error", "设置断点失败"}};
+            return breakpointFailure("设置断点失败");
         return {{"success", true}, {"result", nullptr}};
     });
 
@@ -966,7 +989,7 @@ void IpcServer::RegisterBuiltinMethods() {
     RegisterMethod("remove_breakpoint", [](const json& p) -> json {
         uint64_t addr = ParseAddress(p, "address");
         if (!RemoveKernelBreakpoint(addr))
-            return {{"success", false}, {"error", "移除断点失败"}};
+            return breakpointFailure("移除断点失败");
         return {{"success", true}, {"result", nullptr}};
     });
 
@@ -974,7 +997,7 @@ void IpcServer::RegisterBuiltinMethods() {
     RegisterMethod("suspend_breakpoint", [](const json& p) -> json {
         uint64_t addr = ParseAddress(p, "address");
         if (!SuspendKernelBreakpoint(addr))
-            return {{"success", false}, {"error", "暂停断点失败"}};
+            return breakpointFailure("暂停断点失败");
         return {{"success", true}, {"result", nullptr}};
     });
 
@@ -982,7 +1005,7 @@ void IpcServer::RegisterBuiltinMethods() {
     RegisterMethod("resume_breakpoint", [](const json& p) -> json {
         uint64_t addr = ParseAddress(p, "address");
         if (!ResumeKernelBreakpoint(addr))
-            return {{"success", false}, {"error", "恢复断点失败"}};
+            return breakpointFailure("恢复断点失败");
         return {{"success", true}, {"result", nullptr}};
     });
 
@@ -990,8 +1013,9 @@ void IpcServer::RegisterBuiltinMethods() {
     RegisterMethod("read_bp_info", [](const json& p) -> json {
         uint64_t addr = ParseAddress(p, "address");
         std::vector<HW_HIT_INFO> infos;
-        if (!ReadKernelBreakpointInfo(addr, infos))
-            return {{"success", false}, {"error", "读取断点信息失败"}};
+        uint64_t totalHits = 0;
+        if (!ReadKernelBreakpointInfo(addr, infos, PORT_MAIN, &totalHits))
+            return breakpointFailure("读取断点信息失败");
         json arr = json::array();
         for (auto& h : infos) {
             json regs = json::array();
@@ -1010,7 +1034,8 @@ void IpcServer::RegisterBuiltinMethods() {
                 {"regs", regs}
             });
         }
-        return {{"success", true}, {"result", arr}};
+        return {{"success", true}, {"result",
+            {{"total_hits", totalHits}, {"returned", (int)infos.size()}, {"hits", arr}}}};
     });
     // ── execute_lua ───────────────────────────────────────────────
 #ifdef HAVE_LUAJIT

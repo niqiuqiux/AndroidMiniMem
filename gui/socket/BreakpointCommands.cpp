@@ -117,8 +117,11 @@ bool ResumeKernelBreakpoint(uint64_t address, PortType port) {
     });
 }
 
-bool ReadKernelBreakpointInfo(uint64_t address, std::vector<HW_HIT_INFO> &infos, PortType port) {
+bool ReadKernelBreakpointInfo(uint64_t address, std::vector<HW_HIT_INFO> &infos, PortType port,
+                              uint64_t *outTotalHits) {
     infos.clear();
+    if (outTotalHits)
+        *outTotalHits = 0;
 
     return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
         unsigned char command = CMD_KERNEL_READHWBPINFO;
@@ -137,6 +140,8 @@ bool ReadKernelBreakpointInfo(uint64_t address, std::vector<HW_HIT_INFO> &infos,
             TotalCount > static_cast<uint64_t>(kMaxBreakpointHitCount) ||
             static_cast<uint64_t>(result) > TotalCount)
             return false;
+        if (outTotalHits)
+            *outTotalHits = TotalCount;
         if (result > 0) {
             std::vector<HW_HIT_INFO> receivedInfos(static_cast<size_t>(result));
             if (!client->Receive(receivedInfos.data(), static_cast<size_t>(result) * sizeof(HW_HIT_INFO)))

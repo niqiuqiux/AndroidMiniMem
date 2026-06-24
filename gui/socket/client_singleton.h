@@ -149,9 +149,12 @@ bool ReadBratchAddr(
     std::vector<std::pair<uint64_t, std::vector<uint8_t>> /*addr,data*/> &out,
     PortType type = PORT_MAIN);
 
+// outWritten（可选）回传连续写入的字节数：返回 true 表示全部写入；
+// 返回 false 且 *outWritten>0 表示【部分写入】(已产生副作用)；*outWritten==0 表示完全失败。
 bool WriteProcessMemoryBytes(uint64_t address, uint32_t size,
                              std::vector<unsigned char> &data,
-                             PortType type = PORT_MAIN);
+                             PortType type = PORT_MAIN,
+                             int32_t *outWritten = nullptr);
 
 // Resolve helpers
 bool GetModuleBaseByName(const std::string &moduleName, uint64_t &outBase,
@@ -170,7 +173,8 @@ bool RemoveKernelBreakpoint(uint64_t address, PortType type = PORT_MAIN);
 bool SuspendKernelBreakpoint(uint64_t address, PortType type = PORT_MAIN);
 bool ResumeKernelBreakpoint(uint64_t address, PortType type = PORT_MAIN);
 bool ReadKernelBreakpointInfo(uint64_t address, std::vector<HW_HIT_INFO> &infos,
-                              PortType type = PORT_MAIN);
+                              PortType type = PORT_MAIN,
+                              uint64_t *outTotalHits = nullptr);  // 回传设备累计命中数
 bool ClearTrackedKernelBreakpoints(PortType type = PORT_MAIN);
 
 // ELF 符号接口

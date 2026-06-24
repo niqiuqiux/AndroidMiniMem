@@ -79,10 +79,17 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             address: 断点地址
         """
         parse_int(address)
-        hits = ipc.call_or_raise("read_bp_info", {"address": address})
+        data = ipc.call_or_raise("read_bp_info", {"address": address})
+        # 兼容新(对象 {total_hits, returned, hits})与旧(数组)两种返回形状
+        if isinstance(data, dict):
+            hits = data.get("hits", [])
+            total = data.get("total_hits", len(hits))
+        else:
+            hits = data or []
+            total = len(hits)
         if not hits:
-            return f"断点 {address} 无命中记录"
-        lines = [f"断点 {address} 共 {len(hits)} 次命中:", ""]
+            return f"断点 {address} 无命中记录（设备累计命中 {total} 次）"
+        lines = [f"断点 {address}：本次返回 {len(hits)} 条记录（设备累计命中 {total} 次）:", ""]
         for i, h in enumerate(hits):
             lines.append(f"--- 命中 #{i + 1} ---")
             lines.append(f"  命中地址: {h['hit_addr']}")

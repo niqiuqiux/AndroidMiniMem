@@ -51,11 +51,21 @@ public:
         size_t* lpNumberOfBytesRead = NULL) override{ return 0; };
 
     size_t Read(uintptr_t address, void* buffer, size_t len) const override {
-        return pread64(memFd_, buffer, len, address);
+        if (len == 0 || !buffer) return 0;
+        // pread64 在 /proc/pid/mem 上天然是连续前缀语义：读到首个不可读页即止；
+        // 返回 -1 时归零（避免 (size_t)-1 巨值），并清零未读区以满足读契约。
+        ssize_t r = pread64(memFd_, buffer, len, address);
+        size_t got = (r > 0) ? static_cast<size_t>(r) : 0;
+        if (got < len)
+            std::memset(static_cast<char*>(buffer) + got, 0, len - got);
+        return got;
     }
 
     size_t Write(uintptr_t address, const void* buffer, size_t len) const override {
-        return pwrite64(memFd_, buffer, len, address);
+        if (len == 0 || !buffer) return 0;
+        // pwrite64 连续写入，返回连续写入字节数；-1 归零（避免 (size_t)-1 巨值）。
+        ssize_t r = pwrite64(memFd_, buffer, len, address);
+        return (r > 0) ? static_cast<size_t>(r) : 0;
     }
 
     pid_t GetProcessId() const override {

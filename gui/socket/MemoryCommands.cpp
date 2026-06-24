@@ -73,7 +73,10 @@ bool ReadProcessMemoryBytes(uint64_t address, uint32_t size,
 }
 
 bool WriteProcessMemoryBytes(uint64_t address, uint32_t size,
-                             std::vector<unsigned char> &data, PortType port) {
+                             std::vector<unsigned char> &data, PortType port,
+                             int32_t *outWritten) {
+    if (outWritten)
+        *outWritten = 0;
     if (!isValidReadSize(size) || data.size() != static_cast<size_t>(size))
         return false;
 
@@ -89,10 +92,13 @@ bool WriteProcessMemoryBytes(uint64_t address, uint32_t size,
             return false;
         if (!client->Send(data.data(), data.size()))
             return false;
-        CeWriteProcessMemoryOutput output;
+        CeWriteProcessMemoryOutput output{};
         if (!client->Receive(&output, sizeof(output)))
             return false;
-        return output.written == size;
+        // 连续前缀语义：output.written 为连续写入字节数，可 < size（部分写入）
+        if (outWritten)
+            *outWritten = output.written;
+        return output.written == static_cast<int32_t>(size);  // 仅全部写入才算成功
     });
 }
 
@@ -201,11 +207,16 @@ bool ReadBratchAddr(std::vector<std::pair<uint64_t, int32_t>> &addrs,
         receivedItems.reserve(static_cast<size_t>(result));
         for (int i = 0; i < result; i++) {
             uint64_t addr = 0;
-            uint32_t sz = input[i].size;
-            std::vector<unsigned char> data(sz);
             if (!client->Receive(&addr, sizeof(addr)))
                 return false;
-            if (!client->Receive(data.data(), data.size()))
+            // 每条带有效长度前缀：连续可读字节数（可小于请求 size，0=该地址不可读）
+            uint32_t vlen = 0;
+            if (!client->Receive(&vlen, sizeof(vlen)))
+                return false;
+            if (vlen > input[i].size)
+                return false;
+            std::vector<unsigned char> data(vlen);
+            if (vlen > 0 && !client->Receive(data.data(), data.size()))
                 return false;
             receivedItems.emplace_back(addr, std::move(data));
         }
