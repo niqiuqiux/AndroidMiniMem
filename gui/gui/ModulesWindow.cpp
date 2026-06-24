@@ -238,7 +238,7 @@ void ModulesWindow::onDraw()
 					if (module.flag & PROT_PRIVATE) ImGui::Text("  - 私有映射");
 					if (module.flag & PROT_SHARED) ImGui::Text("  - 共享映射");
 					ImGui::Separator();
-					ImGui::TextColored(ColorScheme::SuccessLight, "右键菜单可浏览内存");
+					ImGui::TextColored(ColorScheme::SuccessLight, "右键菜单可复制模块名/基址");
 					ImGui::EndTooltip();
 				}
 				
@@ -257,11 +257,6 @@ void ModulesWindow::onDraw()
 						char addrBuf[32];
 						std::snprintf(addrBuf, sizeof(addrBuf), "0x%llX", (unsigned long long)module.base);
 						ImGui::SetClipboardText(addrBuf);
-					}
-					
-					if (ImGui::MenuItem("在内存查看器中打开")) {
-						navigateToAddress(module.base);
-						Gui::log("跳转到模块基址: 0x%llX (%s)", (unsigned long long)module.base, module.name.c_str());
 					}
 					
 					ImGui::EndPopup();

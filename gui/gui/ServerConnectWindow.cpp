@@ -119,7 +119,8 @@ void ServerConnectWindow::drawConnectionControls() {
 
   ImGui::InputText("主机", hostBuf, IM_ARRAYSIZE(hostBuf));
   ImGui::InputInt("端口", &port);
-  ImGui::Checkbox("自动重连", &autoReconnect);
+  if (ImGui::Checkbox("自动重连", &autoReconnect))
+    saveConfig();
   ImGui::Text("状态: %s", status.c_str());
 
   auto client = GetSocketMgr().GetClient(PORT_MAIN);
@@ -132,6 +133,7 @@ void ServerConnectWindow::drawConnectionControls() {
       }
       bool ok = GetSocketMgr().ConnectMultiPort(hostBuf, static_cast<uint16_t>(port));
       updateStatus(ok, "连接");
+      if (ok) saveConfig();  // 记住成功连接的主机/端口
     }
   } else {
     if (ImGui::Button("断开连接")) {
@@ -205,30 +207,41 @@ void ServerConnectWindow::loadConfig()
 {
 	auto& config = ConfigManager::getInstance();
 	config.loadConfig("config.ini");
-	
+
+	// 加载上次连接的主机 / 端口 / 自动重连（默认沿用构造函数里的值）
+	std::string host = config.getString("host", hostBuf);
+	std::snprintf(hostBuf, sizeof(hostBuf), "%s", host.c_str());
+	port = config.getInt("port", port);
+	autoReconnect = config.getInt("autoReconnect", autoReconnect ? 1 : 0) != 0;
+
 	// 加载卡密
 	std::string cardKey = config.getString("cardKey", "1142192691366763");
 	std::snprintf(cardKeyBuf, sizeof(cardKeyBuf), "%s", cardKey.c_str());
-	
+
 	// 加载内核版本
 	KernelVersionBuf = config.getChar("kernelVersion", '6');
-	
-	Gui::log("配置已加载: 卡密=%s, 内核版本=%c", cardKeyBuf, KernelVersionBuf);
+
+	Gui::log("配置已加载 (host=%s:%d, 卡密=%s, 内核=%c系)", hostBuf, port, cardKeyBuf, KernelVersionBuf);
 }
 
 void ServerConnectWindow::saveConfig()
 {
 	auto& config = ConfigManager::getInstance();
-	
+
+	// 保存主机 / 端口 / 自动重连
+	config.setString("host", std::string(hostBuf));
+	config.setInt("port", port);
+	config.setInt("autoReconnect", autoReconnect ? 1 : 0);
+
 	// 保存卡密
 	config.setString("cardKey", std::string(cardKeyBuf));
-	
+
 	// 保存内核版本
 	config.setChar("kernelVersion", KernelVersionBuf);
-	
+
 	// 保存到文件
 	if (config.saveConfig("config.ini")) {
-		Gui::log("配置已保存: 卡密=%s, 内核版本=%c", cardKeyBuf, KernelVersionBuf);
+		Gui::log("配置已保存 (host=%s:%d, 卡密=%s, 内核=%c系)", hostBuf, port, cardKeyBuf, KernelVersionBuf);
 	} else {
 		Gui::log("配置保存失败: 无法写入 config.ini");
 	}

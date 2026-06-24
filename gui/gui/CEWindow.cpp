@@ -199,6 +199,13 @@ void CEWindow::onDraw()
                        "内存读写、断点、ELF符号等能力通过 MCP (IPC 端口 28100) 对外提供。");
     ImGui::Spacing();
 
+    // IPC 服务端点（本前端的核心用途：供外部 MCP/AI 桥接）
+    ImGui::TextColored(ColorScheme::InfoLight, "IPC 服务 (供 MCP 桥接): 127.0.0.1:28100");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("复制端点"))
+        ImGui::SetClipboardText("127.0.0.1:28100");
+    ImGui::Spacing();
+
     ImGui::Text("可用功能窗口:");
     if (ImGui::Button("模块列表", ImVec2(200, 40))) {
         openModulesWindow();

@@ -19,6 +19,11 @@ namespace Gui {
 	void mainLoop();
 	std::vector<std::pair<std::string, int>> getLogsSnapshot();
 
+	inline void clearLogs() {
+		std::lock_guard<std::mutex> lock(logsMutex);
+		logs.clear();
+	}
+
 	inline void log(const char* fmt, ...) {
 		char small_buf[512];
 		va_list args;

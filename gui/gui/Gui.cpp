@@ -50,7 +50,7 @@ namespace Gui {
 				Gui::addWindow(new LuaScriptWindow());
 #endif
 			}
-			Gui::log("欢迎使用 Cheat Turbine！");
+			Gui::log("欢迎使用 MiniMem，请先在「服务器连接」窗口连接设备");
 			bootstrapped = true;
 		}
 
