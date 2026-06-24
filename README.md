@@ -108,3 +108,9 @@ amem-mcp               # 启动 stdio MCP，桥接 GUI 的 IPC 服务
 符号：`symbol_init` `symbol_list` `symbol_find`
 脚本：`execute_lua`
 状态：`get_status` `get_version` `get_architecture` `init_driver`
+
+## 文档
+
+- [engine/ceserver/cmd.md](engine/ceserver/cmd.md) — Socket 二进制协议：命令字、线格式、内存读写"连续前缀"语义
+- [docs/api_design.md](docs/api_design.md) — API 设计契约与决策：连续前缀读/写三态、批量读、返回值/错误约定、模块基址/断点/符号/指针链要点、新增 API 规范
+- 各子项目另有 `CLAUDE.md`（`engine/`、`gui/`）说明构建与架构。
