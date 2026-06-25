@@ -16,7 +16,7 @@ cmake --build build
 - `main.cpp` — Win32 窗口 + 渲染循环（`Gui::mainLoop()`），启动 IPC 服务（28100 端口）。
 - `socket/client_singleton.h/.cpp` — 设备协议**单一真相源**，`WinSocketClientMgr` 管理三端口（MAIN/DEBUG/ERROR）。命令实现按域拆分：`ProcessCommands` / `MemoryCommands` / `BreakpointCommands` / `SymbolCommands`（**无** Scan/Freeze）。
 - `ipc/IpcServer.cpp` — 手写 HTTP 服务（仅 127.0.0.1:28100），`RegisterBuiltinMethods()` 注册 21 个方法，是 MCP 的桥梁。
-- `gui/` — 窗口：`CEWindow`(主控/进程选择) `ServerConnectWindow` `ModulesWindow` `LogWindow` `VersionWindow` `LuaScriptWindow` `LuaImGuiWindow`；`Window` 基类、`Gui` 命名空间、`AppContext`（进程状态 + 模块/符号缓存）、`EventBus`。
+- `gui/` — 窗口：`CEWindow`(主控/进程选择) `ServerConnectWindow` `ModulesWindow` `LogWindow` `VersionWindow` `LuaScriptWindow` `LuaImGuiWindow`；`Window` 基类、`Gui` 命名空间、`AppContext`（进程状态 + 模块/符号缓存）。
 - `lua/` — `LuaEngine` + `LuaAPI`(进程/模块/断点) / `LuaAPI_Memory`(读写) / `LuaAPI_ImGui`(绘制) / `LuaAPI_Assembly`(汇编，Capstone/Keystone 门控)。Lua 用于复杂分析，可被 GUI 与 IPC `execute_lua` 触发。
 
 ## 重要：已移除的能力

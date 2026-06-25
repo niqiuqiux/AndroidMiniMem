@@ -26,8 +26,7 @@ ServerConnectWindow::ServerConnectWindow()
 	port = 52736;
 	autoReconnect = false;
 	status = "空闲";
-	lastConnected = GetSocketMgr().GetClient(PORT_MAIN)->IsConnected();
-	
+
 	// 初始化新增成员变量
 	currentMemType = 0;
 	//std::snprintf(cardKeyBuf, sizeof(cardKeyBuf), "%s", "");

@@ -31,11 +31,7 @@ constexpr int kDefaultIpcLuaTimeoutSeconds = 30;
 constexpr int kMaxIpcLuaTimeoutSeconds = 300;
 constexpr size_t kMaxIpcStringParamBytes = 4096;
 constexpr size_t kMaxIpcLuaCodeBytes = 256 * 1024;
-constexpr size_t kMaxIpcScanHexBytes = 4096;
 constexpr size_t kMaxIpcOffsetChainLength = 1024;
-constexpr int kKnownMemoryTypeMask =
-    Anonymous | C_Alloc | C_Heap | C_Data | C_Bss | Java_Heap |
-    Java | Stack | Video | Code_App | Code_System | Ashmem | Bad;
 
 bool isBlankString(const std::string& value) {
     return std::all_of(value.begin(), value.end(), [](unsigned char ch) {
@@ -377,13 +373,6 @@ bool getOptionalBoolParam(const json& params, const char* key, bool defaultValue
 
 bool isValidBreakpointSize(uint32_t size) {
     return size == 1 || size == 2 || size == 4 || size == 8;
-}
-
-bool isValidMemoryTypeFlags(int type) {
-    if (type == All || type == Other) {
-        return true;
-    }
-    return type > 0 && (type & ~kKnownMemoryTypeMask) == 0;
 }
 } // namespace
 

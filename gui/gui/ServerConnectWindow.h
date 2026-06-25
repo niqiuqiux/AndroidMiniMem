@@ -20,8 +20,7 @@ private:
 	int port;
 	bool autoReconnect;
 	std::string status;
-	bool lastConnected;
-	
+
 	// 新增成员变量
 	int currentMemType;
 	char cardKeyBuf[256] = "1142192691366763";

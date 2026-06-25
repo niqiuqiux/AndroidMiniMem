@@ -23,7 +23,6 @@ public:
 	bool hasProcess() const;
 	int currentPid() const;
 	std::string currentProcessName() const;
-	void navigateToAddress(uint64_t addr);
 
 protected:
 	bool shouldRefresh(float& timer, float interval);

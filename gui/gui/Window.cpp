@@ -1,8 +1,5 @@
 #include "Window.h"
 #include "AppContext.h"
-#include "EventBus.h"
-#include "Events.h"
-#include "Gui.h"
 #include "../imgui/imgui.h"
 
 void Window::draw()
@@ -36,11 +33,6 @@ int Window::currentPid() const {
 
 std::string Window::currentProcessName() const {
     return AppContext::Get().getSelectedName();
-}
-
-void Window::navigateToAddress(uint64_t addr) {
-    // MiniMem: 内存查看器窗口已移除，此处仅发布事件（当前无内置订阅者）
-    EventBus::Get().publish(NavigateToAddressEvent{addr});
 }
 
 bool Window::shouldRefresh(float& timer, float interval) {

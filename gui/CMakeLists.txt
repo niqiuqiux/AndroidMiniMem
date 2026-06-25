@@ -103,7 +103,6 @@ set(GUI_SOURCES
     gui/ConfigManager.cpp
     gui/LogWindow.cpp
     gui/AppContext.cpp
-    gui/ValueFormatter.cpp
 )
 
 # Lua 脚本引擎（用于复杂分析）
