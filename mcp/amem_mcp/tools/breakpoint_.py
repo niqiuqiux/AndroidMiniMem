@@ -8,15 +8,29 @@
 
 MCP 层不做任何翻译，整数值直接透传给 C++ 层。也可传入语义字符串
 (read/write/readwrite/access/execute)，由工具层解析。
+
+命中读取采用「聚合摘要 + 按需钻取」两层接口:
+  - read_breakpoint_info  默认返回聚合摘要(命中总数、热点 PC/调用来源 Top-N、
+    参数分布、代表样本)。高频断点几秒可累积上万条命中且高度冗余,逐条返回会
+    淹没 AI、塞爆上下文,聚合后信息密度更高。
+  - read_breakpoint_samples 从最近一次 read_breakpoint_info 拉取的批次中分页
+    取原始逐条记录(engine 侧「拉取即清空」,故钻取基于该快照缓存)。
 """
 
 from __future__ import annotations
 
+from collections import Counter
+
 from mcp.server.fastmcp import FastMCP
 
 from ..constants import BP_TYPE_BY_NAME, BP_TYPE_EXECUTE, BP_TYPE_NAMES
-from ..helpers import parse_int
+from ..helpers import clamp_page, parse_int
 from ..ipc_client import IpcClient
+
+# 最近一次 read_breakpoint_info 拉取的命中批次缓存: addr_int -> {"hits": [...], "total": int}
+# 供 read_breakpoint_samples 钻取。engine 侧 read 是「拉取即清空」,故钻取只能基于此快照。
+_HIT_CACHE: dict[int, dict] = {}
+_SAMPLE_MAX = 50
 
 
 def _resolve_bp_type(bp_type: int | str) -> int:
@@ -35,6 +49,75 @@ def _resolve_bp_type(bp_type: int | str) -> int:
             f"bp_type 非法: {bp_type}，合法字符串: {sorted(BP_TYPE_BY_NAME.keys())}"
         )
     return BP_TYPE_BY_NAME[key]
+
+
+def _to_int(value) -> int:
+    """把命中记录里的地址字段(可能是 '0x..' 字符串或整数)统一成 int。"""
+    if isinstance(value, int):
+        return value
+    return int(str(value), 0)
+
+
+def _reg(h: dict, i: int):
+    """安全取第 i 个通用寄存器(X0..X30)，越界返回 None。"""
+    regs = h.get("regs") or []
+    return regs[i] if i < len(regs) else None
+
+
+def _fmt_reg_lines(h: dict, indent: str = "  ") -> list[str]:
+    """把一条命中的 X0..X30 格式化成每行 4 个寄存器。"""
+    regs = h.get("regs") or []
+    out = []
+    for j in range(0, min(len(regs), 31), 4):
+        parts = [f"X{j + k}={regs[j + k]:#x}" for k in range(4) if j + k < len(regs)]
+        out.append(indent + " ".join(parts))
+    return out
+
+
+def _summarize(address: str, hits: list, total: int) -> str:
+    """把一批命中记录聚合成高信息密度的摘要文本。"""
+    addr_int = _to_int(address)
+    n = len(hits)
+    pcs = [_to_int(h.get("pc", "0x0")) for h in hits]
+    # 类型推断: 执行断点命中 PC 恒等于断点地址; 数据监视点的 PC 是各访问指令(≠数据地址)
+    is_exec = n > 0 and all(pc == addr_int for pc in pcs)
+
+    lines = [
+        f"断点 {address} 命中摘要",
+        f"  本次拉取 {n} 条 · 设备累计 {total} 次 · 推断【{'执行断点' if is_exec else '数据监视点'}】",
+    ]
+    times = [h["hit_time"] for h in hits
+             if isinstance(h.get("hit_time"), int) and h["hit_time"] > 0]
+    if len(times) >= 2:
+        lines.append(f"  采样时间跨度 {(max(times) - min(times)) / 1e6:.1f} ms")
+    lines.append("")
+
+    if is_exec:
+        # 执行断点: PC 恒定无信息量, 改按「调用来源 LR(X30)」聚合 + 首参 X0 分布
+        lrs = Counter(_reg(h, 30) for h in hits if _reg(h, 30) is not None)
+        lines.append(f"▼ 调用来源 Top10 (LR/X30, 共 {len(lrs)} 个不同来源)")
+        for lr, c in lrs.most_common(10):
+            lines.append(f"  ×{c} ({c * 100 // max(n, 1)}%)  LR={lr:#x}")
+        x0s = Counter(_reg(h, 0) for h in hits if _reg(h, 0) is not None)
+        lines.append("")
+        lines.append(f"▼ 首参 X0 常见值 Top8 (共 {len(x0s)} 种)")
+        lines.append("  " + " · ".join(f"{v:#x}×{c}" for v, c in x0s.most_common(8)))
+    else:
+        # 数据监视点: 按「访问指令 PC」聚合 — 哪些指令在读写被监控地址
+        pcc = Counter(pcs)
+        lines.append(f"▼ 访问指令 Top10 (PC, 共 {len(pcc)} 个不同指令)")
+        for pc, c in pcc.most_common(10):
+            lines.append(f"  ×{c} ({c * 100 // max(n, 1)}%)  PC={pc:#x}")
+
+    s = hits[0]
+    lines.append("")
+    lines.append("▼ 代表样本 (第 1 条)")
+    lines.append(f"  命中地址={s.get('hit_addr')}  PC={s.get('pc')}  SP={s.get('sp')}")
+    lines.extend(_fmt_reg_lines(s))
+    lines.append("")
+    lines.append(f'ℹ 钻取原始记录: read_breakpoint_samples("{address}", offset, count)')
+    lines.append("  热点地址可用 list_modules / symbol_find 定位所属模块/函数")
+    return "\n".join(lines)
 
 
 def register(mcp: FastMCP, ipc: IpcClient) -> None:
@@ -69,16 +152,20 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         """
         parse_int(address)
         ipc.call_or_raise("remove_breakpoint", {"address": address})
+        _HIT_CACHE.pop(parse_int(address), None)  # 清掉钻取缓存,避免陈旧
         return f"断点 {address} 已移除"
 
     @mcp.tool()
     def read_breakpoint_info(address: str) -> str:
-        """读取断点命中信息（ARM64 寄存器状态）。
+        """读取断点命中信息，返回【聚合摘要】(命中总数、热点 PC/调用来源 Top-N、参数分布、代表样本)。
+
+        高频断点(如 malloc、活跃栈)几秒可累积上万条命中且高度冗余,本工具聚合后返回
+        以保持信息密度;需要逐条原始寄存器时用 read_breakpoint_samples 钻取。
 
         Args:
             address: 断点地址
         """
-        parse_int(address)
+        addr_int = parse_int(address)
         data = ipc.call_or_raise("read_bp_info", {"address": address})
         # 兼容新(对象 {total_hits, returned, hits})与旧(数组)两种返回形状
         if isinstance(data, dict):
@@ -87,17 +174,43 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         else:
             hits = data or []
             total = len(hits)
+        # 仅在有命中时刷新缓存,避免一次空读清掉上一批可钻取的样本
+        if hits:
+            _HIT_CACHE[addr_int] = {"hits": hits, "total": total}
         if not hits:
             return f"断点 {address} 无命中记录（设备累计命中 {total} 次）"
-        lines = [f"断点 {address}：本次返回 {len(hits)} 条记录（设备累计命中 {total} 次）:", ""]
-        for i, h in enumerate(hits):
-            lines.append(f"--- 命中 #{i + 1} ---")
-            lines.append(f"  命中地址: {h['hit_addr']}")
-            lines.append(f"  PC: {h['pc']}  SP: {h['sp']}")
-            regs = h.get("regs", [])
-            for j in range(0, min(len(regs), 31), 4):
-                parts = [f"X{j+k}={regs[j+k]:#x}" for k in range(4) if j + k < len(regs)]
-                lines.append(f"  {' '.join(parts)}")
+        return _summarize(address, hits, total)
+
+    @mcp.tool()
+    def read_breakpoint_samples(address: str, offset: int = 0, count: int = 20) -> str:
+        """钻取最近一次 read_breakpoint_info 拉取批次的原始逐条命中记录（分页）。
+
+        engine 侧命中「拉取即清空」,故只能钻取最近一次 read_breakpoint_info 缓存的批次;
+        若期间又调用了 read_breakpoint_info,缓存会刷新为新批次。
+
+        Args:
+            address: 断点地址
+            offset: 起始索引,默认 0
+            count: 返回条数,默认 20,最大 50
+        """
+        addr_int = parse_int(address)
+        off, cnt = clamp_page(offset, count, _SAMPLE_MAX)
+        cached = _HIT_CACHE.get(addr_int)
+        if not cached or not cached.get("hits"):
+            return f"断点 {address} 无缓存命中记录，请先调用 read_breakpoint_info 拉取一批"
+        hits = cached["hits"]
+        page = hits[off:off + cnt]
+        if not page:
+            return f"断点 {address} offset={off} 超出缓存范围（缓存 {len(hits)} 条）"
+        lines = [
+            f"断点 {address} 原始命中 [{off}, {off + len(page)}) / 缓存 {len(hits)} 条"
+            f"（设备累计 {cached.get('total')} 次）:",
+            "",
+        ]
+        for i, h in enumerate(page):
+            lines.append(f"--- #{off + i + 1} ---")
+            lines.append(f"  命中地址={h.get('hit_addr')}  PC={h.get('pc')}  SP={h.get('sp')}")
+            lines.extend(_fmt_reg_lines(h))
             lines.append("")
         return "\n".join(lines)
 
