@@ -145,6 +145,21 @@ BOOL CApi::InitReadWriteDriver(const char *procNodeAuthKey,
                                std::string &out_result) {
   out_result = "加载模块失败";
 
+  // 若内核驱动连接仍然有效，说明已处于内核模式，直接复用，不重建 AndroidMemKernel。
+  // 注意：不能用 g_memIO->type 判断（该字段可能被前端改写），驱动连接状态（m_nFd）
+  // 才是唯一可靠依据。否则下方 g_memIO = std::move(memKernel) 会析构旧内核对象，
+  // 其析构调用 DisconnectDriver() 关掉全局共享 driver_ 的 fd
+  // （典型触发：切到内核模式后关闭 GUI，重开再次走 init_driver）。
+{
+  std::shared_lock<std::shared_mutex> rlock(g_globalMutex);
+  if (g_memIO->type == MemType_Kernel && driver_->IsDriverConnected()) {
+    uint64_t cardTime = 0;
+    g_memIO->GetCardTime(cardTime);
+    out_result = std::to_string(cardTime);
+    return 2;                       // 复用现有连接，不重建、不 move
+  }
+}
+
   // 先尝试通过 anon_fd 连接驱动
   std::unique_ptr<AndroidMemKernel> memKernel = std::make_unique<AndroidMemKernel>();
   if (memKernel->connect()) {
