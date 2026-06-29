@@ -721,16 +721,15 @@ static std::vector<unsigned char> HexToBytes(const std::string& hex) {
 }
 
 
-// 断点失败时：若当前不在内核读写模式，给出可操作的明确提示（硬件断点依赖内核驱动）
+// 断点操作失败时的错误信息。硬件断点支持两种后端——内核驱动（init_driver 切内核模式）
+// 与用户态 perf_event_open（默认 syscall 模式即可，无需内核驱动）——故不再假设
+// “必须内核模式”，改为列出中性的常见失败原因供排查（避免把 perf 后端的失败误导到内核模式）。
 static json breakpointFailure(const char* genericMsg) {
-    int memType = 0;
-    if (GetMemType(memType) && memType != MemType_Kernel) {
-        return {{"success", false},
-                {"error", std::string("断点功能需要内核读写模式(当前模式 ") +
-                          std::to_string(memType) +
-                          ")，请先调用 init_driver 切换到内核模式"}};
-    }
-    return {{"success", false}, {"error", genericMsg}};
+    return {{"success", false},
+            {"error", std::string(genericMsg) +
+                      "（硬件断点支持内核驱动 / 用户态 perf 两种后端，均需 root；"
+                      "常见原因：未 root、perf_event_paranoid 过高、"
+                      "地址无效或未按监控长度对齐、硬件断点槽位耗尽、目标线程已退出）"}};
 }
 
 static uint64_t ParseAddress(const json& params, const std::string& key) {
