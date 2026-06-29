@@ -331,10 +331,9 @@ class AMemClient:
             hits = []
             if hit_count <= 0:
                 return hits
-            # HW_HIT_INFO: hit_addr(8) + hit_time(8) + _user_pt_regs(288) + _user_fpsimd_state(520)
+            # HW_HIT_INFO: hit_addr(8) + hit_time(8) + _user_pt_regs(288)（已去除 fpsimd_info）
             # _user_pt_regs: 31*Q + sp + pc + pstate + orig_x0 + syscallno = 36*8 = 288
-            # _user_fpsimd_state: 32*16 + I + I = 520
-            HIT_SIZE = 8 + 8 + 288 + 520
+            HIT_SIZE = 8 + 8 + 288
             raw = self._recv_all(hit_count * HIT_SIZE)
             for i in range(hit_count):
                 off = i * HIT_SIZE
@@ -344,6 +343,6 @@ class AMemClient:
                 off += 31 * 8
                 sp, pc, pstate = struct.unpack_from("<QQQ", raw, off)
                 off += 24
-                # orig_x0, syscallno (跳过) + fpsimd (520 bytes, 跳过)
+                # orig_x0, syscallno (跳过)
                 hits.append(BreakpointHit(hit_addr, hit_time, regs, sp, pc, pstate))
             return hits

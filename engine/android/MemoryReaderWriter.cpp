@@ -652,17 +652,26 @@ BOOL CMemoryReaderWriter::_hwbpProcDriver_ReadHwBpInfo(int nDriverLink, uint64_t
     //printf("nHitTotalCount:%lu, nHitItemArrCount:%lu\n", userData.nHitTotalCount, userData.nHitItemArrCount);
     if (userData.nHitItemArrCount > 0) {
       			std::vector<char> big_buf;
-			big_buf.resize(sizeof(struct HW_HIT_ITEM) * userData.nHitItemArrCount);
-			
+			// 按内核 ko 的原始 ABI（含 fpsimd）布局读取，避免 stride 错位
+			big_buf.resize(sizeof(struct HwBpHitRaw) * userData.nHitItemArrCount);
+
         res = _rwProcMemDriver_MyIoctl(nDriverLink, CMD_HWBP_READ_INFO, hHwbp, 0, 0, big_buf.data(), big_buf.size());
         if (res < 0) {
             LOGDF("ReadHwBpInfo ioctl():%s\n", strerror(errno));
             return FALSE;
         }
 
-      		auto* items = reinterpret_cast<const HW_HIT_ITEM*>(big_buf.data());
+      		auto* raws = reinterpret_cast<const HwBpHitRaw*>(big_buf.data());
 			size_t count = userData.nHitItemArrCount;
-			vOutput.insert(vOutput.end(), items, items + count);
+			// 转换为精简的 HW_HIT_ITEM（丢弃 fpsimd_info，仅保留通用寄存器+pc/sp）
+			for (size_t i = 0; i < count; ++i) {
+				HW_HIT_ITEM item;
+				item.task_id = raws[i].task_id;
+				item.hit_addr = raws[i].hit_addr;
+				item.hit_time = raws[i].hit_time;
+				item.regs_info = raws[i].regs_info;
+				vOutput.push_back(item);
+			}
     }
     return TRUE;
 }

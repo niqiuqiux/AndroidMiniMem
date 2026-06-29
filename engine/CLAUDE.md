@@ -28,7 +28,7 @@ cmake -S . -B build -DANDROID_NDK=<ndk> -DCMAKE_BUILD_TYPE=Release && cmake --bu
 ```
 
 - **内核切换**：`CApi::InitReadWriteDriver`（`CMD_INITRWDRIVER`）尝试 anon_fd 连接或 `finit_module` 加载内核驱动，成功后把全局 `g_memIO` 热替换为 `AndroidMemKernel`；默认是 `AndroidMemorySys`（syscall）。`GetRWDriverType`（`CMD_GETMEMTYPE`）返回当前模式（IO/Syscall/Kernel/SysHook）。
-- **断点**：`CMD_KERNEL_SETBREAKPOINT` 等经 `driver_`(`CMemoryReaderWriter`，定义于 `android/MemoryReaderWriter`) 下发硬件断点；`ReadHwBpInfo` 轮询命中记录。
+- **断点**：`CMD_KERNEL_SETBREAKPOINT` 等支持双后端，**均为进程级逻辑断点 + 自动跟随新线程**，按 handle 归属分发（先 `PerfHwBreakpoint::Owns` 再 `KernelHwBreakpoint::Owns`，查 map 权威判别）——内核模式经 `android/KernelHwBreakpoint.hpp`（封装 `driver_`(`CMemoryReaderWriter`) 的 per-tid 断点）；非内核模式经 `android/PerfHwBreakpoint.hpp`（用户态 `perf_event_open`，后台消费 ring buffer）。两引擎后台线程均周期 rescan `/proc/<pid>/task` 补下断新线程 / 回收退出线程，命中皆"被动累积 + `ReadHwBpInfo` 轮询"。
 - **ELF 符号**：`android/AndroidElfScanner` 解析符号表（`CMD_SYMBOL_*`）。
 - `ptrace_hw/`（可选，`BUILD_PTRACE_HW`）：基于 ptrace 的 ARM64 硬件断点底层支持。
 

@@ -51,7 +51,7 @@
 
 `CMD_INITRWDRIVER` 是内核切换的入口：服务端尝试通过 anon_fd 连接已加载的内核驱动，或用 `finit_module` 加载 `Mem.ko`（5 系另需 `CFI.ko`），成功后把全局内存读写实现 `g_memIO` 从默认的 `AndroidMemorySys`（syscall 模式）热替换为 `AndroidMemKernel`（内核模式）。`CMD_GETMEMTYPE` 查询当前所处模式。
 
-> **硬件断点仅在内核模式下可用**（依赖内核驱动）。未切换内核模式时 `CMD_KERNEL_*` 返回失败。
+> **硬件断点支持两种后端，对协议透明**：内核模式（已 `CMD_INITRWDRIVER` 切换）经内核驱动下发；非内核模式自动回退到**用户态 `perf_event_open`** 引擎（`android/PerfHwBreakpoint.hpp`）。两种后端的命令字 / 参数 / 返回完全一致，前端无需区分；按断点 handle 归属自动分发。
 
 ## 5. 典型流程
 
@@ -67,4 +67,4 @@
 
 - 未实现 / 未知命令落入 `default` 分支（不响应或返回错误）。
 - 客户端需检查每次 Send / Receive 的返回值，确保数据完整。
-- 硬件断点依赖内核驱动支持，需 root，且须先 `CMD_INITRWDRIVER` 切换到内核模式。
+- 硬件断点需 root。两种后端（内核驱动 / 用户态 `perf_event_open`）均为进程级逻辑断点，后台周期 rescan `/proc/<pid>/task` **自动跟随目标新建线程**；命中均"被动累积 + `CMD_KERNEL_READHWBPINFO` 轮询"。perf 后端额外受 `perf_event_paranoid` 与每线程硬件断点 slot 数量限制、且可能被目标进程探测。

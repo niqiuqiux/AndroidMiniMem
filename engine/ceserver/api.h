@@ -197,19 +197,11 @@ struct _user_pt_regs {
     uint64_t syscallno;
 };
 
-struct _user_fpsimd_state {
-	// unsigned char vregs[32][16];
-	__uint128_t	vregs[32];
-	__u32 fpsr;
-	__u32 fpcr;
-};
-
 struct HW_HIT_INFO {
 
     uint64_t hit_addr;
     uint64_t hit_time;
     struct _user_pt_regs regs_info;
-	struct _user_fpsimd_state fpsimd_info;
 };
 #pragma pack()
 
@@ -237,7 +229,6 @@ public:
 
 	// 断点与调试控制（内核硬件断点）
 	static int SetBreakpoint(HANDLE hProcess,  uint64_t address, int bpType, int bpSize);
-	static uint64_t _SetBreakpoint(HANDLE hProcess, int tid, uint64_t address, int bpType, int bpSize);
 	static int RemoveBreakpoint(HANDLE hProcess,uint64_t hwaddr);
 	static int SuspendBreakpoint(HANDLE hProcess,uint64_t hwaddr);
 	static int ResumeBreakpoint(HANDLE hProcess,uint64_t hwaddr);

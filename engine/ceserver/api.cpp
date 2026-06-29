@@ -38,6 +38,8 @@
 #include "AndroidMemorySys.hpp"//sys_process_vm_readv
 #include "AndroidMemKernel.hpp"//ko
 #include "MemoryReaderWriter.h"//硬件断点驱动（必需，driver_变量定义在此）
+#include "PerfHwBreakpoint.hpp"//用户态 perf_event_open 硬件断点引擎（非内核模式回退）
+#include "KernelHwBreakpoint.hpp"//内核驱动断点的进程级封装（自动跟随新线程）
 
 #include "AndroidTracer.hpp"
 #include "AndroidElfScanner.hpp"
@@ -579,6 +581,20 @@ void CApi::CloseHandle(HANDLE h) {
 			std::shared_lock<std::shared_mutex> rlock(g_globalMutex);
 			g_memIO->CloseHandle();
 		}
+		// 清理该进程残留的用户态 perf 断点（fd/mmap/后台线程引用），避免泄漏；
+		// 内核驱动 handle 由内核在进程退出时回收，维持原有行为
+		{
+			std::lock_guard<std::mutex> lock(pOpenProcess->mHwBpMutex);
+			for (auto& kv : pOpenProcess->mHwBpList) {
+				for (auto hwhandle : kv.second) {
+					if (PerfHwBreakpoint::Get().Owns(hwhandle)) {
+						PerfHwBreakpoint::Get().DelProcessHwBp(hwhandle);
+					} else if (KernelHwBreakpoint::Get().Owns(hwhandle)) {
+						KernelHwBreakpoint::Get().DelProcessHwBp(hwhandle);
+					}
+				}
+			}
+		}
 		// 不自动停止调试，交由调用方控制 StopDebug
 		delete pOpenProcess;
 	}
@@ -873,12 +889,11 @@ BOOL GetProcessTask(int pid, std::vector<int> & vOutput) {
 //static std::vector<uint64_t> vHwBpHandle;
 
 int CApi::SetBreakpoint(HANDLE hProcess, uint64_t address, int bpType, int bpSize){
+	// 选择断点后端：内核模式走内核驱动，否则回退到用户态 perf 引擎
+	bool useKernel;
 	{
 		std::shared_lock<std::shared_mutex> rlock(g_globalMutex);
-		if(!driver_->IsDriverConnected()||g_memIO->type!=MemType_Kernel) {
-			LOGD("SetBreakpoint: driver not connected or not kernel mode\n");
-			return 0;
-		}
+		useKernel = driver_->IsDriverConnected() && g_memIO->type == MemType_Kernel;
 	}
 
 	if (CPortHelper::GetHandleType(hProcess) != htProcesHandle) {
@@ -899,21 +914,16 @@ int CApi::SetBreakpoint(HANDLE hProcess, uint64_t address, int bpType, int bpSiz
 	}
 
 
-	//获取当前进程所有的task
-	std::vector<int> vTask;
-	GetProcessTask(processdata->pid, vTask);
-	if (vTask.size() == 0) {
-		LOGD("GetProcessTask failed\n");
-		return 0;
-	}
+	// 执行断点(X)长度固定为 A64 指令宽度 4；读/写/访问断点用调用方传入的长度
+	unsigned int len = (bpType == HW_BREAKPOINT_X) ? 4u : (unsigned int)bpSize;
 
-	//设置进程硬件断点
+	// 两种后端均为"进程级逻辑断点"：引擎内部遍历目标线程并周期 rescan 跟随新建线程，各返回单个逻辑 handle
 	std::vector<uint64_t> HwBpHandle;
-	for (int tid : vTask) {
-		uint64_t hwBpHandle = _SetBreakpoint(hProcess, tid, address, bpType, bpSize);
-		if (hwBpHandle != 0) {
-			HwBpHandle.push_back(hwBpHandle);
-		}
+	uint64_t hwBpHandle = useKernel
+		? KernelHwBreakpoint::Get().AddProcessHwBp(processdata->pid, address, len, bpType)
+		: PerfHwBreakpoint::Get().AddProcessHwBp(processdata->pid, address, len, bpType);
+	if (hwBpHandle != 0) {
+		HwBpHandle.push_back(hwBpHandle);
 	}
 	
 	//添加或更新断点记录（使用 map 结构，自动去重和快速查找）
@@ -930,36 +940,22 @@ int CApi::SetBreakpoint(HANDLE hProcess, uint64_t address, int bpType, int bpSiz
 		}
 		processdata->mHwBpList[address] = HwBpHandle;
 	}
+	// 删除旧 handle 时按归属分发（perf / 内核驱动）
 	for (auto hwhandle : oldHandles) {
-		driver_->DelProcessHwBp(hwhandle);
+		if (PerfHwBreakpoint::Get().Owns(hwhandle)) {
+			PerfHwBreakpoint::Get().DelProcessHwBp(hwhandle);
+		} else {
+			driver_->DelProcessHwBp(hwhandle);
+		}
 	}
 	return HwBpHandle.size();
 
 }
 
 
-uint64_t CApi::_SetBreakpoint(HANDLE hProcess, int tid, uint64_t address, int bpType, int bpSize){
-	if(!driver_->IsDriverConnected()) {
-		return 0;
-	}
-
-	uint64_t hwBpHandle = driver_->AddProcessHwBp(tid, address, bpSize, bpType);
-	if (hwBpHandle == 0) {
-		return 0;
-	}
-
-	return hwBpHandle;
-
-}
+// 说明：原 _SetBreakpoint 已被 SetBreakpoint 内联的双后端分发取代（perf 进程级 + 内核 per-tid）。
 
 int CApi::RemoveBreakpoint(HANDLE hProcess,uint64_t hwaddr){
-	{
-		std::shared_lock<std::shared_mutex> rlock(g_globalMutex);
-		if(!driver_->IsDriverConnected()||g_memIO->type!=MemType_Kernel) {
-			return 0;
-		}
-	}
-
 	if (CPortHelper::GetHandleType(hProcess) != htProcesHandle) {
 		return 0;
 	}
@@ -985,7 +981,13 @@ int CApi::RemoveBreakpoint(HANDLE hProcess,uint64_t hwaddr){
 	}
 	if (!handles.empty()) {
 		for (auto hwhandle : handles) {
-			driver_->DelProcessHwBp(hwhandle);
+			if (PerfHwBreakpoint::Get().Owns(hwhandle)) {
+				PerfHwBreakpoint::Get().DelProcessHwBp(hwhandle);
+			} else if (KernelHwBreakpoint::Get().Owns(hwhandle)) {
+				KernelHwBreakpoint::Get().DelProcessHwBp(hwhandle);
+			} else {
+				driver_->DelProcessHwBp(hwhandle);
+			}
 		}
 		return 1;
 	}
@@ -994,13 +996,6 @@ int CApi::RemoveBreakpoint(HANDLE hProcess,uint64_t hwaddr){
 }
 
 int CApi::SuspendBreakpoint(HANDLE hProcess,uint64_t hwaddr){
-	{
-		std::shared_lock<std::shared_mutex> rlock(g_globalMutex);
-		if(!driver_->IsDriverConnected()||g_memIO->type!=MemType_Kernel) {
-			return 0;
-		}
-	}
-
 	if (CPortHelper::GetHandleType(hProcess) != htProcesHandle) {
 		return 0;
 	}
@@ -1025,7 +1020,13 @@ int CApi::SuspendBreakpoint(HANDLE hProcess,uint64_t hwaddr){
 	}
 	if (!handles.empty()) {
 		for (auto hwhandle : handles) {
-			driver_->SuspendProcessHwBp(hwhandle);
+			if (PerfHwBreakpoint::Get().Owns(hwhandle)) {
+				PerfHwBreakpoint::Get().SuspendProcessHwBp(hwhandle);
+			} else if (KernelHwBreakpoint::Get().Owns(hwhandle)) {
+				KernelHwBreakpoint::Get().SuspendProcessHwBp(hwhandle);
+			} else {
+				driver_->SuspendProcessHwBp(hwhandle);
+			}
 		}
 		return 1;
 	}
@@ -1035,13 +1036,6 @@ int CApi::SuspendBreakpoint(HANDLE hProcess,uint64_t hwaddr){
 }
 
 int CApi::ResumeBreakpoint(HANDLE hProcess,uint64_t hwaddr){
-	{
-		std::shared_lock<std::shared_mutex> rlock(g_globalMutex);
-		if(!driver_->IsDriverConnected()||g_memIO->type!=MemType_Kernel) {
-			return 0;
-		}
-	}
-
 	if (CPortHelper::GetHandleType(hProcess) != htProcesHandle) {
 		return 0;
 	}
@@ -1066,7 +1060,13 @@ int CApi::ResumeBreakpoint(HANDLE hProcess,uint64_t hwaddr){
 	}
 	if (!handles.empty()) {
 		for (auto hwhandle : handles) {
-			driver_->ResumeProcessHwBp(hwhandle);
+			if (PerfHwBreakpoint::Get().Owns(hwhandle)) {
+				PerfHwBreakpoint::Get().ResumeProcessHwBp(hwhandle);
+			} else if (KernelHwBreakpoint::Get().Owns(hwhandle)) {
+				KernelHwBreakpoint::Get().ResumeProcessHwBp(hwhandle);
+			} else {
+				driver_->ResumeProcessHwBp(hwhandle);
+			}
 		}
 		return 1;
 	}
@@ -1076,13 +1076,6 @@ int CApi::ResumeBreakpoint(HANDLE hProcess,uint64_t hwaddr){
 }
 
 int CApi::ReadHwBpInfo(HANDLE hProcess,uint64_t hwaddr,uint64_t& nHitTotalCount, std::vector<HW_HIT_INFO>& vOutput){
-	{
-		std::shared_lock<std::shared_mutex> rlock(g_globalMutex);
-		if(!driver_->IsDriverConnected()||g_memIO->type!=MemType_Kernel) {
-			return 0;
-		}
-	}
-
 	nHitTotalCount = 0;
 	vOutput.clear();
 	std::vector<HW_HIT_ITEM> vHwBpInfo;
@@ -1117,7 +1110,13 @@ int CApi::ReadHwBpInfo(HANDLE hProcess,uint64_t hwaddr,uint64_t& nHitTotalCount,
 		LOGDF("ReadHwBpInfo hwhandle %lx", hwhandle);
 		uint64_t hitCount = 0;
 		std::vector<HW_HIT_ITEM> vHandleHwBpInfo;
-		if (!driver_->ReadHwBpInfo(hwhandle, hitCount, vHandleHwBpInfo)) {
+		// 按归属分发：perf 引擎 / 内核驱动
+		bool ok = PerfHwBreakpoint::Get().Owns(hwhandle)
+			? PerfHwBreakpoint::Get().ReadHwBpInfo(hwhandle, hitCount, vHandleHwBpInfo)
+			: KernelHwBreakpoint::Get().Owns(hwhandle)
+				? KernelHwBreakpoint::Get().ReadHwBpInfo(hwhandle, hitCount, vHandleHwBpInfo)
+				: driver_->ReadHwBpInfo(hwhandle, hitCount, vHandleHwBpInfo);
+		if (!ok) {
 			continue;
 		}
 		nHitTotalCount += hitCount;
@@ -1129,7 +1128,6 @@ int CApi::ReadHwBpInfo(HANDLE hProcess,uint64_t hwaddr,uint64_t& nHitTotalCount,
 		hwBpInfo.hit_addr = item.hit_addr;
 		hwBpInfo.hit_time = item.hit_time;
 		memcpy(&hwBpInfo.regs_info, &item.regs_info, sizeof(HW_HIT_INFO::regs_info));
-		memcpy(&hwBpInfo.fpsimd_info, &item.fpsimd_info, sizeof(HW_HIT_INFO::fpsimd_info));
 		LOGDF("addr %lx time %lx pc %lx", hwBpInfo.hit_addr, hwBpInfo.hit_time, hwBpInfo.regs_info.pc);
 		vOutput.push_back(hwBpInfo);
 	}

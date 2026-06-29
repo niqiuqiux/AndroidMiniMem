@@ -96,23 +96,11 @@ struct _user_pt_regs {
     uint64_t syscallno;
 };
 
-struct _user_fpsimd_state {
-	// unsigned char vregs[32][16];
-#ifdef _MSC_VER
-	unsigned char vregs[32][16];
-#else
-	__uint128_t	vregs[32];
-#endif
-	uint32_t fpsr;
-	uint32_t fpcr;
-};
-
 struct HW_HIT_INFO {
-    
+
     uint64_t hit_addr;
     uint64_t hit_time;
     struct _user_pt_regs regs_info;
-    struct _user_fpsimd_state fpsimd_info;
 };
 
 

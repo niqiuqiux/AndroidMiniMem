@@ -79,12 +79,22 @@ struct my_user_fpsimd_state {
     __u32 fpcr;
 };
 
-struct HW_HIT_ITEM {
+// 内核 ko 命中记录的原始 ABI 布局（含 fpsimd，必须与内核驱动保持一致，勿改）。
+// 仅用于 driver 从 ko 读取命中数组时的 stride 解析，随后转换为精简的 HW_HIT_ITEM。
+struct HwBpHitRaw {
     uint64_t task_id;
     uint64_t hit_addr;
     uint64_t hit_time;
     struct my_user_pt_regs regs_info;
     struct my_user_fpsimd_state fpsimd_info;
+};
+
+// 上层使用的命中记录：仅通用寄存器 + pc/sp（去除 fpsimd，与 perf 后端对齐）。
+struct HW_HIT_ITEM {
+    uint64_t task_id;
+    uint64_t hit_addr;
+    uint64_t hit_time;
+    struct my_user_pt_regs regs_info;
 };
 #pragma pack()
 #endif
