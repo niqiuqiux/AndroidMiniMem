@@ -1,6 +1,6 @@
-# CLAUDE.md — gui/（MiniMem Windows 前端）
+# CLAUDE.md — gui/（MiniMem 跨平台前端）
 
-精简版 Windows 前端：Dear ImGui + DirectX 12。**前端只为方便 MCP 调用**，仅保留服务器连接、进程选择、模块列表、日志、Lua 脚本管理器，并在 `127.0.0.1:28100` 内嵌 IPC 服务供 MCP 桥接。
+精简版跨平台前端：Windows 使用 Dear ImGui + DirectX 12，Linux 使用 Dear ImGui + GLFW + OpenGL3。**前端只为方便 MCP 调用**，仅保留服务器连接、进程选择、模块列表、日志、Lua 脚本管理器，并在 `127.0.0.1:28100` 内嵌 IPC 服务供 MCP 桥接。
 
 ## 构建
 
@@ -9,11 +9,12 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-产物 `bin/MiniMemClient.exe`。依赖：DirectX 12 SDK、Windows SDK，以及 `third_party/LuaJIT/`（`include/` + `lib/lua51.lib`，缺失则 `FATAL_ERROR`）。可选：Capstone（反汇编）、Keystone（汇编）——供 Lua 汇编 API 使用，缺失则相应功能禁用。`third_party/nlohmann/json.hpp` 供 IPC 使用。
+Windows 产物 `bin/MiniMemClient.exe`，依赖 DirectX 12 SDK、Windows SDK。Linux 依赖 OpenGL 与 GLFW3 开发包，例如 Debian/Ubuntu 上安装 `libgl1-mesa-dev libglfw3-dev`。LuaJIT 使用 OpenResty luajit2（Ubuntu 包：`libluajit2-5.1-dev luajit2`；pkg-config 名称仍是 `luajit`）；缺失时 Lua 窗口与 Lua IPC 方法禁用。可选：Capstone（反汇编）、Keystone（汇编）——供 Lua 汇编 API 使用，缺失则相应功能禁用；Linux 下 CMake 默认从 `third_party/keystone-linux` 查找 Keystone。`third_party/nlohmann/json.hpp` 供 IPC 使用。
 
 ## 架构
 
-- `main.cpp` — Win32 窗口 + 渲染循环（`Gui::mainLoop()`），启动 IPC 服务（28100 端口）。
+- `main.cpp` — 平台无关入口，创建 `renderer/AppWindow`，运行 `Gui::mainLoop()`，启动 IPC 服务（28100 端口）。
+- `renderer/AppWindowWin32.cpp` / `renderer/AppWindowGLFW.cpp` — 平台窗口与 ImGui 后端封装；Windows 走 DX12，Linux 走 GLFW/OpenGL3。
 - `socket/client_singleton.h/.cpp` — 设备协议**单一真相源**，`WinSocketClientMgr` 管理三端口（MAIN/DEBUG/ERROR）。命令实现按域拆分：`ProcessCommands` / `MemoryCommands` / `BreakpointCommands` / `SymbolCommands`（**无** Scan/Freeze）。
 - `ipc/IpcServer.cpp` — 手写 HTTP 服务（仅 127.0.0.1:28100），`RegisterBuiltinMethods()` 注册 21 个方法，是 MCP 的桥梁。
 - `gui/` — 窗口：`CEWindow`(主控/进程选择) `ServerConnectWindow` `ModulesWindow` `LogWindow` `VersionWindow` `LuaScriptWindow` `LuaImGuiWindow`；`Window` 基类、`Gui` 命名空间、`AppContext`（进程状态 + 模块/符号缓存）。

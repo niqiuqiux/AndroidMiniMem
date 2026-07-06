@@ -1,7 +1,6 @@
 #pragma once
 
-#include <winsock2.h>
-#include <windows.h>
+#include "socket_platform.h"
 
 #include <chrono>
 
@@ -106,19 +105,20 @@ public:
         const DWORD remainingMs = GetRemainingTimeoutMs();
         const DWORD timeoutMs =
             remainingMs < kMinIoTimeoutMs ? kMinIoTimeoutMs : remainingMs;
-        int optLen = sizeof(previous_);
+        SocketPlatform::SocketOptionLength optLen = sizeof(previous_);
         restore_ = ::getsockopt(sock_, SOL_SOCKET, option_,
-                                reinterpret_cast<char*>(&previous_),
+                                SocketPlatform::MutableOptionData(previous_),
                                 &optLen) != SOCKET_ERROR;
+        const auto timeoutValue = SocketPlatform::MakeTimeoutValue(timeoutMs);
         (void)::setsockopt(sock_, SOL_SOCKET, option_,
-                           reinterpret_cast<const char*>(&timeoutMs),
-                           sizeof(timeoutMs));
+                           SocketPlatform::OptionData(timeoutValue),
+                           sizeof(timeoutValue));
     }
 
     ~SocketOptionTimeoutGuard() {
         if (restore_ && sock_ != INVALID_SOCKET) {
             (void)::setsockopt(sock_, SOL_SOCKET, option_,
-                               reinterpret_cast<const char*>(&previous_),
+                               SocketPlatform::OptionData(previous_),
                                sizeof(previous_));
         }
     }
@@ -133,7 +133,7 @@ public:
 private:
     SOCKET sock_ = INVALID_SOCKET;
     int option_ = 0;
-    DWORD previous_ = 0;
+    SocketPlatform::SocketTimeoutValue previous_ = {};
     bool restore_ = false;
 };
 

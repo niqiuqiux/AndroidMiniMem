@@ -16,7 +16,7 @@ namespace Gui {
 	extern std::list<std::pair<std::string, int>> logs;
 	extern std::mutex logsMutex;
 
-	void mainLoop();
+	bool mainLoop();
 	std::vector<std::pair<std::string, int>> getLogsSnapshot();
 
 	inline void clearLogs() {

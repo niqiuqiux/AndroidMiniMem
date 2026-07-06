@@ -1,5 +1,11 @@
 #pragma once
 
+#ifdef _WIN32
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include <Windows.h>
 #include <DbgHelp.h>
 #include <Psapi.h>
@@ -625,3 +631,130 @@ namespace ExceptionHandler
     }
 }
 
+#else
+
+#include <csignal>
+#include <cstdlib>
+#include <ctime>
+#include <exception>
+#include <filesystem>
+#include <iomanip>
+#include <sstream>
+#include <string>
+
+namespace ExceptionHandler
+{
+    enum class ExceptionType
+    {
+        CPP_TERMINATE,
+        SIGNAL_ABORT,
+        SIGNAL_FPE,
+        SIGNAL_ILLEGAL,
+        SIGNAL_INT,
+        SIGNAL_SEGV
+    };
+
+    struct ExceptionInfo
+    {
+        ExceptionType type;
+        unsigned long exceptionCode;
+        void* exceptionAddress;
+        std::string description;
+        std::string dumpFilePath;
+        void* pExceptionPointers;
+    };
+
+    typedef void (*ExceptionCallback)(const ExceptionInfo& info);
+
+    static ExceptionCallback g_exceptionCallback = nullptr;
+    static std::string g_dumpDirectory = "./";
+    static std::string g_applicationName = "Application";
+
+    inline std::string GetTimestamp()
+    {
+        time_t now = time(nullptr);
+        tm timeInfo{};
+        localtime_r(&now, &timeInfo);
+
+        std::ostringstream oss;
+        oss << std::setfill('0')
+            << std::setw(4) << (timeInfo.tm_year + 1900)
+            << std::setw(2) << (timeInfo.tm_mon + 1)
+            << std::setw(2) << timeInfo.tm_mday << "_"
+            << std::setw(2) << timeInfo.tm_hour
+            << std::setw(2) << timeInfo.tm_min
+            << std::setw(2) << timeInfo.tm_sec;
+        return oss.str();
+    }
+
+    inline ExceptionType SignalToExceptionType(int signal)
+    {
+        switch (signal)
+        {
+        case SIGABRT: return ExceptionType::SIGNAL_ABORT;
+        case SIGFPE:  return ExceptionType::SIGNAL_FPE;
+        case SIGILL:  return ExceptionType::SIGNAL_ILLEGAL;
+        case SIGINT:  return ExceptionType::SIGNAL_INT;
+        case SIGSEGV: return ExceptionType::SIGNAL_SEGV;
+        default:      return ExceptionType::CPP_TERMINATE;
+        }
+    }
+
+    inline void Notify(ExceptionType type, const std::string& description)
+    {
+        ExceptionInfo info = {};
+        info.type = type;
+        info.exceptionCode = 0;
+        info.exceptionAddress = nullptr;
+        info.description = description;
+        info.dumpFilePath = g_dumpDirectory + g_applicationName + "_" + GetTimestamp() + ".txt";
+        info.pExceptionPointers = nullptr;
+        if (g_exceptionCallback)
+        {
+            g_exceptionCallback(info);
+        }
+    }
+
+    inline void TerminateHandler()
+    {
+        Notify(ExceptionType::CPP_TERMINATE, "C++ terminate");
+        std::_Exit(1);
+    }
+
+    inline void SignalHandler(int signal)
+    {
+        Notify(SignalToExceptionType(signal), "Signal " + std::to_string(signal));
+        std::_Exit(1);
+    }
+
+    inline bool Initialize(
+        const char* applicationName = "Application",
+        const char* dumpDirectory = "./",
+        ExceptionCallback callback = nullptr)
+    {
+        g_applicationName = applicationName;
+        g_dumpDirectory = dumpDirectory;
+        g_exceptionCallback = callback;
+
+        if (!g_dumpDirectory.empty() && g_dumpDirectory.back() != '/')
+        {
+            g_dumpDirectory += "/";
+        }
+        std::filesystem::create_directories(g_dumpDirectory);
+
+        std::set_terminate(TerminateHandler);
+        signal(SIGABRT, SignalHandler);
+        signal(SIGFPE, SignalHandler);
+        signal(SIGILL, SignalHandler);
+        signal(SIGINT, SignalHandler);
+        signal(SIGSEGV, SignalHandler);
+        return true;
+    }
+
+    inline void TriggerExceptionReport(const char* reason = "Manual Trigger")
+    {
+        Notify(ExceptionType::CPP_TERMINATE, reason);
+    }
+}
+
+#endif

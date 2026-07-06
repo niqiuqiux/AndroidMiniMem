@@ -17,8 +17,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 渲染后端选项
-option(USE_DX11 "Use DirectX 11 backend" OFF)
-option(USE_DX12 "Use DirectX 12 backend" ON)
+if(WIN32)
+    option(USE_DX12 "Use DirectX 12 backend" ON)
+    option(USE_OPENGL3 "Use GLFW + OpenGL3 backend" OFF)
+else()
+    option(USE_DX12 "Use DirectX 12 backend" OFF)
+    option(USE_OPENGL3 "Use GLFW + OpenGL3 backend" ON)
+endif()
 
 # 生成版本信息头文件
 string(TIMESTAMP BUILD_DATE "%Y-%m-%d")
@@ -66,7 +71,12 @@ else()
 endif()
 
 # ==================== 可选：Keystone（Lua 汇编） ====================
-set(keystone_ROOT "C:/vcpkg/installed/x64-windows" CACHE PATH "Keystone installation directory")
+if(WIN32)
+    set(_KEYSTONE_DEFAULT_ROOT "C:/vcpkg/installed/x64-windows")
+else()
+    set(_KEYSTONE_DEFAULT_ROOT "${CMAKE_SOURCE_DIR}/third_party/keystone-linux")
+endif()
+set(keystone_ROOT "${_KEYSTONE_DEFAULT_ROOT}" CACHE PATH "Keystone installation directory")
 find_path(KEYSTONE_INCLUDE_DIR keystone/keystone.h
     HINTS "${keystone_ROOT}/include" "${keystone_ROOT}" PATH_SUFFIXES include)
 find_library(KEYSTONE_LIBRARY NAMES keystone
@@ -87,7 +97,6 @@ set(IMGUI_SOURCES
     imgui/imgui_tables.cpp
     imgui/imgui_widgets.cpp
     imgui/imgui_demo.cpp
-    imgui/backends/imgui_impl_win32.cpp
 )
 
 # GUI：精简版仅保留 主窗口/服务器连接/模块列表/日志/版本 + 反汇编辅助(供 Lua)
@@ -106,33 +115,70 @@ set(GUI_SOURCES
 )
 
 # Lua 脚本引擎（用于复杂分析）
-set(LUA_SOURCES
-    lua/LuaEngine.cpp
-    lua/LuaAPI.cpp
-    lua/LuaAPI_Memory.cpp
-    lua/LuaAPI_ImGui.cpp
-    lua/LuaAPI_Assembly.cpp
-)
+set(LUA_SOURCES)
 
-# 查找 LuaJIT（必需）
+# 查找 LuaJIT（可选）。Linux 优先使用 OpenResty luajit2 包；
+# Ubuntu 的 libluajit2-5.1-dev 提供 pkg-config 名称 luajit 和库名 luajit-5.1。
 option(LUAJIT_STATIC "Link LuaJIT statically" ON)
 set(LUAJIT_DIR "${CMAKE_SOURCE_DIR}/third_party/LuaJIT")
 set(LUAJIT_INCLUDE "${LUAJIT_DIR}/include")
 set(LUAJIT_LIB "${LUAJIT_DIR}/lib")
 set(LUAJIT_BIN "${LUAJIT_DIR}/bin")
 
-if((EXISTS "${LUAJIT_INCLUDE}/lua.hpp" OR EXISTS "${LUAJIT_INCLUDE}/luajit.h" OR EXISTS "${LUAJIT_INCLUDE}/lua.h")
-   AND EXISTS "${LUAJIT_LIB}/lua51.lib")
+set(HAVE_LUAJIT FALSE)
+set(_LUAJIT_HAS_HEADERS FALSE)
+if(EXISTS "${LUAJIT_INCLUDE}/lua.hpp" OR EXISTS "${LUAJIT_INCLUDE}/luajit.h" OR EXISTS "${LUAJIT_INCLUDE}/lua.h")
+    set(_LUAJIT_HAS_HEADERS TRUE)
+endif()
+
+if(_LUAJIT_HAS_HEADERS)
+    set(_LUAJIT_LOCAL_NAMES luajit-5.1 luajit)
+    if(WIN32)
+        list(PREPEND _LUAJIT_LOCAL_NAMES lua51)
+    endif()
+    find_library(LUAJIT_LIBRARY
+        NAMES ${_LUAJIT_LOCAL_NAMES}
+        HINTS "${LUAJIT_LIB}"
+        NO_DEFAULT_PATH)
+    if(LUAJIT_LIBRARY)
+        set(HAVE_LUAJIT TRUE)
+        set(LUAJIT_IS_STATIC ${LUAJIT_STATIC})
+    endif()
+endif()
+
+if(NOT HAVE_LUAJIT)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(PC_LUAJIT QUIET luajit)
+        if(NOT PC_LUAJIT_FOUND)
+            pkg_check_modules(PC_LUAJIT QUIET luajit2)
+        endif()
+        if(NOT PC_LUAJIT_FOUND)
+            pkg_check_modules(PC_LUAJIT QUIET luajit-5.1)
+        endif()
+    endif()
+endif()
+
+if(PC_LUAJIT_FOUND)
     set(HAVE_LUAJIT TRUE)
-    set(LUAJIT_LIBRARY "${LUAJIT_LIB}/lua51.lib")
+    set(LUAJIT_INCLUDE ${PC_LUAJIT_INCLUDE_DIRS})
+    set(LUAJIT_LIBRARY ${PC_LUAJIT_LINK_LIBRARIES})
+    set(LUAJIT_IS_STATIC OFF)
+elseif(HAVE_LUAJIT)
     set(LUAJIT_IS_STATIC ${LUAJIT_STATIC})
 else()
-    message(FATAL_ERROR "未在 third_party/LuaJIT 目录找到 LuaJIT！")
-    set(HAVE_LUAJIT FALSE)
+    message(WARNING "LuaJIT 未找到：Lua 脚本窗口与 Lua IPC 方法将被禁用。")
 endif()
 
 if(HAVE_LUAJIT)
     list(APPEND GUI_SOURCES gui/LuaScriptWindow.cpp gui/LuaImGuiWindow.cpp)
+    list(APPEND LUA_SOURCES
+        lua/LuaEngine.cpp
+        lua/LuaAPI.cpp
+        lua/LuaAPI_Memory.cpp
+        lua/LuaAPI_ImGui.cpp
+        lua/LuaAPI_Assembly.cpp
+    )
 endif()
 
 # Socket 协议层：精简版无搜索/冻结命令
@@ -145,7 +191,6 @@ set(SOCKET_SOURCES
 )
 
 set(RENDERER_SOURCES
-    renderer/DX12Renderer.cpp
     renderer/StyleSetup.cpp
 )
 
@@ -153,15 +198,42 @@ set(IPC_SOURCES
     ipc/IpcServer.cpp
 )
 
-# 配置 DirectX 后端
-if(USE_DX11)
-    add_definitions(-DUSE_DX11)
-    list(APPEND IMGUI_SOURCES imgui/backends/imgui_impl_dx11.cpp)
-    set(DX_LIBS d3d11 dxgi d3dcompiler ws2_32)
-elseif(USE_DX12)
-    add_definitions(-DUSE_DX12)
+# 配置渲染/窗口后端
+if(USE_DX12)
+    if(NOT WIN32)
+        message(FATAL_ERROR "DirectX 12 后端仅支持 Windows；Linux 请使用 USE_OPENGL3=ON。")
+    endif()
     list(APPEND IMGUI_SOURCES imgui/backends/imgui_impl_dx12.cpp)
-    set(DX_LIBS d3d12 dxgi d3dcompiler ws2_32)
+    list(APPEND IMGUI_SOURCES imgui/backends/imgui_impl_win32.cpp)
+    list(APPEND RENDERER_SOURCES renderer/DX12Renderer.cpp renderer/AppWindowWin32.cpp)
+    set(PLATFORM_LIBS d3d12 dxgi d3dcompiler ws2_32)
+elseif(USE_OPENGL3)
+    find_package(OpenGL QUIET)
+    if(NOT OpenGL_FOUND)
+        message(FATAL_ERROR "未找到 OpenGL 开发包。Linux 请安装 libgl1-mesa-dev（Debian/Ubuntu）或 mesa-libGL-devel（Fedora）。")
+    endif()
+    find_package(glfw3 CONFIG QUIET)
+    if(NOT glfw3_FOUND)
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(GLFW3 QUIET IMPORTED_TARGET glfw3)
+        endif()
+    endif()
+    if(NOT glfw3_FOUND AND NOT GLFW3_FOUND)
+        message(FATAL_ERROR "未找到 GLFW3。Linux 请安装 libglfw3-dev（Debian/Ubuntu）或 glfw-devel（Fedora）。")
+    endif()
+
+    list(APPEND IMGUI_SOURCES imgui/backends/imgui_impl_glfw.cpp)
+    list(APPEND IMGUI_SOURCES imgui/backends/imgui_impl_opengl3.cpp)
+    list(APPEND RENDERER_SOURCES renderer/AppWindowGLFW.cpp)
+    set(PLATFORM_LIBS OpenGL::GL)
+    if(glfw3_FOUND)
+        list(APPEND PLATFORM_LIBS glfw)
+    else()
+        list(APPEND PLATFORM_LIBS PkgConfig::GLFW3)
+    endif()
+else()
+    message(FATAL_ERROR "必须启用一个窗口/渲染后端：USE_DX12 或 USE_OPENGL3。")
 endif()
 
 add_definitions(-DIMGUI_DISABLE_DEBUG_TOOLS)
@@ -197,13 +269,12 @@ if(HAVE_LUAJIT)
     target_include_directories(MiniMemClient PRIVATE ${LUAJIT_INCLUDE})
 endif()
 
-# 链接系统库（ws2_32 供 Socket 与 IPC HTTP Server 使用）
-target_link_libraries(MiniMemClient ${DX_LIBS})
+# 链接系统库
+target_link_libraries(MiniMemClient ${PLATFORM_LIBS})
 
 # 链接 LuaJIT
 if(HAVE_LUAJIT)
-    get_filename_component(LUAJIT_LIBRARY_ABS ${LUAJIT_LIBRARY} ABSOLUTE)
-    target_link_libraries(MiniMemClient ${LUAJIT_LIBRARY_ABS})
+    target_link_libraries(MiniMemClient ${LUAJIT_LIBRARY})
     target_compile_definitions(MiniMemClient PRIVATE HAVE_LUAJIT)
     if(LUAJIT_IS_STATIC)
         target_compile_definitions(MiniMemClient PRIVATE LUAJIT_STATIC)

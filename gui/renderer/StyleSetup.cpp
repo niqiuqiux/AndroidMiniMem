@@ -1,5 +1,7 @@
 #include "StyleSetup.h"
 
+#include <array>
+
 void StyleSetup::setupImGuiStyle(float scale) {
     ImGuiStyle& style = ImGui::GetStyle();
     ImGuiIO& io = ImGui::GetIO();
@@ -45,21 +47,33 @@ void StyleSetup::setupImGuiStyle(float scale) {
 }
 
 void StyleSetup::loadFonts(ImGuiIO& io) {
-    ImFont* font = nullptr;
-    font = io.Fonts->AddFontFromFileTTF("c:\\Windows\\Fonts\\msyh.ttc", 16.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
-    if (!font) {
-        font = io.Fonts->AddFontFromFileTTF("c:\\Windows\\Fonts\\SourceHanSansCN-Regular.otf", 16.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
-        if (!font) {
-            font = io.Fonts->AddFontFromFileTTF("c:\\Windows\\Fonts\\simsun.ttc", 16.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
-            if (!font) {
-                font = io.Fonts->AddFontFromFileTTF("c:\\Windows\\Fonts\\ArialUni.ttf", 16.0f, nullptr, io.Fonts->GetGlyphRangesChineseFull());
-                if (!font) {
-                    io.Fonts->AddFontDefault();
-                    ImFontConfig config;
-                    config.MergeMode = true;
-                    io.Fonts->AddFontFromFileTTF("c:\\Windows\\Fonts\\msyh.ttc", 16.0f, &config, io.Fonts->GetGlyphRangesChineseFull());
-                }
-            }
+    constexpr float fontSize = 16.0f;
+#ifdef _WIN32
+    const std::array<const char*, 4> fontPaths = {
+        "c:\\Windows\\Fonts\\msyh.ttc",
+        "c:\\Windows\\Fonts\\SourceHanSansCN-Regular.otf",
+        "c:\\Windows\\Fonts\\simsun.ttc",
+        "c:\\Windows\\Fonts\\ArialUni.ttf",
+    };
+#else
+    const std::array<const char*, 8> fontPaths = {
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.otf",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansSC-Regular.ttf",
+        "/usr/share/fonts/opentype/source-han-sans/SourceHanSansCN-Regular.otf",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    };
+#endif
+
+    for (const char* path : fontPaths) {
+        if (io.Fonts->AddFontFromFileTTF(path, fontSize, nullptr,
+                                         io.Fonts->GetGlyphRangesChineseFull())) {
+            return;
         }
     }
+
+    io.Fonts->AddFontDefault();
 }

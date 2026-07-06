@@ -1,6 +1,4 @@
 #pragma once
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <iostream>
 #include <vector>
 #include <string>
@@ -8,12 +6,9 @@
 
 #include <cstring>
 #include <cstdint>
-#include <windows.h>
 
+#include "socket_platform.h"
 #include "socket_io_timeout.h"
-
-// Windows Socket库链接
-#pragma comment(lib, "ws2_32.lib")
 
 // 命令常量 — 必须与后端 engine/ceserver/ceserver.h 逐一对应（协议契约）。
 // opcode 从 0 连续编号（MiniMem 自有协议，已不兼容 Cheat Engine 原始编号）。
@@ -158,20 +153,17 @@ class WindowsSocketClient {
 private:
     SOCKET sock_;
     bool connected_;
-    WSADATA wsaData_;
 
 public:
     WindowsSocketClient() : sock_(INVALID_SOCKET), connected_(false) {
-        // 初始化Winsock
-        int result = WSAStartup(MAKEWORD(2, 2), &wsaData_);
-        if (result != 0) {
-            std::cerr << "WSAStartup failed: " << result << std::endl;
+        if (!SocketPlatform::Startup()) {
+            std::cerr << "Socket startup failed: " << SocketPlatform::LastError() << std::endl;
         }
     }
 
     ~WindowsSocketClient() {
         Close();
-        WSACleanup();
+        SocketPlatform::Cleanup();
     }
 
     bool Connect(const std::string& host, uint16_t port) {
@@ -181,7 +173,7 @@ public:
 
         sock_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (sock_ == INVALID_SOCKET) {
-            std::cerr << "socket() failed: " << WSAGetLastError() << std::endl;
+            std::cerr << "socket() failed: " << SocketPlatform::LastError() << std::endl;
             return false;
         }
 
@@ -191,14 +183,14 @@ public:
 
         if (inet_pton(AF_INET, host.c_str(), &serverAddr.sin_addr) != 1) {
             std::cerr << "Invalid address: " << host << std::endl;
-            closesocket(sock_);
+            SocketPlatform::Close(sock_);
             sock_ = INVALID_SOCKET;
             return false;
         }
 
         if (connect(sock_, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
-            std::cerr << "connect() failed: " << WSAGetLastError() << std::endl;
-            closesocket(sock_);
+            std::cerr << "connect() failed: " << SocketPlatform::LastError() << std::endl;
+            SocketPlatform::Close(sock_);
             sock_ = INVALID_SOCKET;
             return false;
         }
@@ -218,12 +210,12 @@ public:
         while (totalSent < size) {
             int sent = ::send(sock_, buffer + totalSent, static_cast<int>(size - totalSent), 0);
             if (sent == SOCKET_ERROR) {
-                int err = WSAGetLastError();
+                int err = SocketPlatform::LastError();
                 std::cerr << "send() failed: " << err << std::endl;
                 // 仅在真正的连接错误时关闭：这条 socket 由 GUI / AI / IPC 共享，
                 // 单次请求的超时（WSAETIMEDOUT）只是预算事件，不能拆掉共享连接，
                 // 下一次请求前的 DrainPending() 会重新同步协议。
-                if (err == WSAECONNRESET || err == WSAECONNABORTED) {
+                if (SocketPlatform::IsConnectionResetError(err)) {
                     timeoutGuard.dismissRestore();
                     Close();
                 }
@@ -244,13 +236,13 @@ public:
         while (totalReceived < size) {
             int received = ::recv(sock_, buf + totalReceived, static_cast<int>(size - totalReceived), 0);
             if (received == SOCKET_ERROR) {
-                int err = WSAGetLastError();
+                int err = SocketPlatform::LastError();
                 std::cerr << "recv() failed: " << err << std::endl;
                 // 仅在真正的连接错误时关闭：这条 socket 由 GUI / AI / IPC 共享，
                 // 单次请求的超时（WSAETIMEDOUT）只是预算事件，不能拆掉共享连接。
                 // 此时设备的响应可能仍在途/已在缓冲区，下一次请求前的
                 // DrainPending() 会清掉这些过期字节、重新同步协议。
-                if (err == WSAECONNRESET || err == WSAECONNABORTED) {
+                if (SocketPlatform::IsConnectionResetError(err)) {
                     timeoutGuard.dismissRestore();
                     Close();
                 }
@@ -272,8 +264,8 @@ public:
         std::vector<char> buffer(4096);
         size_t totalDrained = 0;
         while (totalDrained < maxBytes) {
-            u_long pending = 0;
-            if (ioctlsocket(sock_, FIONREAD, &pending) == SOCKET_ERROR || pending == 0) {
+            SocketPlatform::AvailableBytes pending = 0;
+            if (SocketPlatform::GetAvailableBytes(sock_, pending) == SOCKET_ERROR || pending <= 0) {
                 break;
             }
 
@@ -281,7 +273,7 @@ public:
                 {buffer.size(), static_cast<size_t>(pending), maxBytes - totalDrained});
             int received = ::recv(sock_, buffer.data(), static_cast<int>(toRead), 0);
             if (received == SOCKET_ERROR) {
-                std::cerr << "drain recv() failed: " << WSAGetLastError() << std::endl;
+                std::cerr << "drain recv() failed: " << SocketPlatform::LastError() << std::endl;
                 break;
             }
             if (received == 0) {
@@ -299,7 +291,7 @@ public:
 
     void Close() {
         if (sock_ != INVALID_SOCKET) {
-            closesocket(sock_);
+            SocketPlatform::Close(sock_);
             sock_ = INVALID_SOCKET;
         }
         connected_ = false;

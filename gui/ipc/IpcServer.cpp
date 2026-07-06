@@ -1,5 +1,6 @@
 #include "IpcServer.h"
 #include "../socket/client_singleton.h"
+#include "../socket/socket_platform.h"
 #include "../socket/socket_io_timeout.h"
 #include "../gui/AppContext.h"
 #include "../gui/Gui.h"
@@ -9,8 +10,6 @@
 #include "../lua/LuaEngine.h"
 #endif
 
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <sstream>
 #include <algorithm>
 #include <iomanip>
@@ -19,8 +18,6 @@
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
-
-#pragma comment(lib, "ws2_32.lib")
 
 namespace {
 constexpr size_t kMaxHttpRequestBytes = 1024 * 1024;
@@ -389,13 +386,15 @@ bool IpcServer::Start(uint16_t port) {
     port_ = port;
     RegisterBuiltinMethods();
 
-    // 确保 Winsock 已初始化（可能在 WindowsSocketClient 之前启动）
-    WSADATA wsaData;
-    WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (!SocketPlatform::Startup()) {
+        Gui::log("[IPC] 初始化 socket 失败");
+        return false;
+    }
 
     listenSocket_ = (uintptr_t)::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listenSocket_ == (uintptr_t)INVALID_SOCKET) {
         Gui::log("[IPC] 创建 socket 失败");
+        SocketPlatform::Cleanup();
         return false;
     }
 
@@ -410,15 +409,17 @@ bool IpcServer::Start(uint16_t port) {
 
     if (::bind((SOCKET)listenSocket_, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
         Gui::log("[IPC] 绑定端口 %d 失败", (int)port_);
-        ::closesocket((SOCKET)listenSocket_);
+        SocketPlatform::Close((SOCKET)listenSocket_);
         listenSocket_ = (uintptr_t)INVALID_SOCKET;
+        SocketPlatform::Cleanup();
         return false;
     }
 
     if (::listen((SOCKET)listenSocket_, SOMAXCONN) == SOCKET_ERROR) {
         Gui::log("[IPC] listen 失败");
-        ::closesocket((SOCKET)listenSocket_);
+        SocketPlatform::Close((SOCKET)listenSocket_);
         listenSocket_ = (uintptr_t)INVALID_SOCKET;
+        SocketPlatform::Cleanup();
         return false;
     }
 
@@ -432,20 +433,40 @@ void IpcServer::Stop() {
     running_.store(false);
     Gui::log("[IPC] 服务正在停止...");
 
+    if (listenSocket_ != (uintptr_t)INVALID_SOCKET) {
+        SocketPlatform::Shutdown((SOCKET)listenSocket_);
+    }
+
+    SOCKET wakeSocket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (wakeSocket != INVALID_SOCKET) {
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port_);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        (void)::connect(wakeSocket, (sockaddr*)&addr, sizeof(addr));
+        SocketPlatform::Close(wakeSocket);
+    }
+
     // 关闭监听 socket 以唤醒 accept()
     if (listenSocket_ != (uintptr_t)INVALID_SOCKET) {
-        ::closesocket((SOCKET)listenSocket_);
+        SocketPlatform::Close((SOCKET)listenSocket_);
         listenSocket_ = (uintptr_t)INVALID_SOCKET;
     }
 
     if (serverThread_.joinable())
         serverThread_.join();
+
+    SocketPlatform::Cleanup();
 }
 
 void IpcServer::ServerThread() {
-    while (running_.load()) {
+    while (true) {
         SOCKET client = ::accept((SOCKET)listenSocket_, nullptr, nullptr);
         if (client == INVALID_SOCKET) break;
+        if (!running_.load()) {
+            SocketPlatform::Close(client);
+            break;
+        }
 
         // 每个请求在独立线程处理（短连接）
         std::thread([this, client]() {
@@ -459,8 +480,9 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
     SOCKET sock = (SOCKET)clientSocket;
 
     // 设置超时
-    DWORD timeout = 5000;
-    ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+    auto timeout = SocketPlatform::MakeTimeoutValue(5000);
+    ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+                 SocketPlatform::OptionData(timeout), sizeof(timeout));
 
     // 读取完整 HTTP 请求（最大 1MB）
     std::string raw;
@@ -548,7 +570,7 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
         json response = {{"success", false}, {"error", earlyError}};
         std::string httpResp = BuildHttpResponse(earlyStatusCode, response.dump());
         ::send(sock, httpResp.c_str(), (int)httpResp.size(), 0);
-        ::closesocket(sock);
+        SocketPlatform::Close(sock);
         return;
     }
 
@@ -558,7 +580,7 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
                                                        : earlyError}};
         std::string httpResp = BuildHttpResponse(400, response.dump());
         ::send(sock, httpResp.c_str(), (int)httpResp.size(), 0);
-        ::closesocket(sock);
+        SocketPlatform::Close(sock);
         return;
     }
 
@@ -566,7 +588,7 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
         json response = {{"success", false}, {"error", "HTTP request too large"}};
         std::string httpResp = BuildHttpResponse(413, response.dump());
         ::send(sock, httpResp.c_str(), (int)httpResp.size(), 0);
-        ::closesocket(sock);
+        SocketPlatform::Close(sock);
         return;
     }
 
@@ -578,7 +600,7 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
                          {"error", "Incomplete HTTP request body"}};
         std::string httpResp = BuildHttpResponse(400, response.dump());
         ::send(sock, httpResp.c_str(), (int)httpResp.size(), 0);
-        ::closesocket(sock);
+        SocketPlatform::Close(sock);
         return;
     }
 
@@ -594,7 +616,7 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
             "Access-Control-Allow-Headers: Content-Type\r\n"
             "Content-Length: 0\r\n\r\n";
         ::send(sock, resp.c_str(), (int)resp.size(), 0);
-        ::closesocket(sock);
+        SocketPlatform::Close(sock);
         return;
     }
 
@@ -616,7 +638,7 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
 
     std::string httpResp = BuildHttpResponse(statusCode, response.dump());
     ::send(sock, httpResp.c_str(), (int)httpResp.size(), 0);
-    ::closesocket(sock);
+    SocketPlatform::Close(sock);
 }
 
 std::string IpcServer::BuildHttpResponse(int statusCode, const std::string& body) {

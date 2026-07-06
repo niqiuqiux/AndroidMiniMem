@@ -35,13 +35,11 @@ bool DisassemblyHelper::initialize(Architecture arch) {
     // 根据架构类型初始化 Capstone
     switch (arch) {
         case Architecture::ARM64:
-            // Capstone 对 ARM64/AArch64 的支持：
-            // - CS_ARCH_ARM64: 如果定义了 CAPSTONE_AARCH64_COMPAT_HEADER
-            // - CS_ARCH_AARCH64: 默认名称
-            #ifdef CAPSTONE_AARCH64_COMPAT_HEADER
-                err = cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &handle);
-            #else
+            // Capstone 4 使用 CS_ARCH_ARM64，较新版本可使用 CS_ARCH_AARCH64。
+            #ifdef CS_ARCH_AARCH64
                 err = cs_open(CS_ARCH_AARCH64, CS_MODE_ARM, &handle);
+            #else
+                err = cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &handle);
             #endif
             break;
         case Architecture::ARM:

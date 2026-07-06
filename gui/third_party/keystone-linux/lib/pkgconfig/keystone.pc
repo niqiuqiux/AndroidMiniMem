@@ -1,0 +1,7 @@
+Name: keystone
+Description: Keystone assembler engine
+Version: 0.9
+libdir=/home/qiu/桌面/MEMTool/AndroidMiniMem/gui/third_party/keystone-linux/lib
+includedir=/home/qiu/桌面/MEMTool/AndroidMiniMem/gui/third_party/keystone-linux/include
+Libs: -L${libdir} -lkeystone
+Cflags: -I${includedir}
