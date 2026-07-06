@@ -112,7 +112,7 @@ void DX12Renderer::endFrame() {
 }
 
 void DX12Renderer::onResize(UINT width, UINT height) {
-    if (pd3dDevice != nullptr) {
+    if (pd3dDevice != nullptr && pSwapChain != nullptr && width > 0 && height > 0) {
         cleanupRenderTarget();
         DXGI_SWAP_CHAIN_DESC1 desc = {};
         pSwapChain->GetDesc1(&desc);
@@ -252,12 +252,13 @@ bool DX12Renderer::createDeviceD3D(HWND hWnd) {
 void DX12Renderer::cleanupDeviceD3D() {
     cleanupRenderTarget();
     if (pSwapChain) { pSwapChain->SetFullscreenState(false, nullptr); pSwapChain->Release(); pSwapChain = nullptr; }
-    if (hSwapChainWaitableObject != nullptr) { CloseHandle(hSwapChainWaitableObject); }
+    if (hSwapChainWaitableObject != nullptr) { CloseHandle(hSwapChainWaitableObject); hSwapChainWaitableObject = nullptr; }
     for (UINT i = 0; i < APP_NUM_FRAMES_IN_FLIGHT; i++)
         if (frameContext[i].CommandAllocator) { frameContext[i].CommandAllocator->Release(); frameContext[i].CommandAllocator = nullptr; }
     if (pd3dCommandQueue) { pd3dCommandQueue->Release(); pd3dCommandQueue = nullptr; }
     if (pd3dCommandList) { pd3dCommandList->Release(); pd3dCommandList = nullptr; }
     if (pd3dRtvDescHeap) { pd3dRtvDescHeap->Release(); pd3dRtvDescHeap = nullptr; }
+    pd3dSrvDescHeapAlloc.Destroy();
     if (pd3dSrvDescHeap) { pd3dSrvDescHeap->Release(); pd3dSrvDescHeap = nullptr; }
     if (fence) { fence->Release(); fence = nullptr; }
     if (fenceEvent) { CloseHandle(fenceEvent); fenceEvent = nullptr; }

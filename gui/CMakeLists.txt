@@ -236,12 +236,6 @@ else()
     message(FATAL_ERROR "必须启用一个窗口/渲染后端：USE_DX12 或 USE_OPENGL3。")
 endif()
 
-add_definitions(-DIMGUI_DISABLE_DEBUG_TOOLS)
-
-if(MSVC)
-    add_compile_options(/utf-8)
-endif()
-
 add_executable(MiniMemClient
     main.cpp
     ${IMGUI_SOURCES}
@@ -251,6 +245,12 @@ add_executable(MiniMemClient
     ${IPC_SOURCES}
     ${LUA_SOURCES}
 )
+
+target_compile_definitions(MiniMemClient PRIVATE IMGUI_DISABLE_DEBUG_TOOLS)
+
+if(MSVC)
+    target_compile_options(MiniMemClient PRIVATE /utf-8)
+endif()
 
 # 包含目录
 target_include_directories(MiniMemClient PRIVATE
@@ -270,11 +270,11 @@ if(HAVE_LUAJIT)
 endif()
 
 # 链接系统库
-target_link_libraries(MiniMemClient ${PLATFORM_LIBS})
+target_link_libraries(MiniMemClient PRIVATE ${PLATFORM_LIBS})
 
 # 链接 LuaJIT
 if(HAVE_LUAJIT)
-    target_link_libraries(MiniMemClient ${LUAJIT_LIBRARY})
+    target_link_libraries(MiniMemClient PRIVATE ${LUAJIT_LIBRARY})
     target_compile_definitions(MiniMemClient PRIVATE HAVE_LUAJIT)
     if(LUAJIT_IS_STATIC)
         target_compile_definitions(MiniMemClient PRIVATE LUAJIT_STATIC)
@@ -287,7 +287,7 @@ endif()
 
 # 链接 Capstone
 if(HAVE_CAPSTONE)
-    target_link_libraries(MiniMemClient ${CAPSTONE_LIBRARIES})
+    target_link_libraries(MiniMemClient PRIVATE ${CAPSTONE_LIBRARIES})
     target_compile_definitions(MiniMemClient PRIVATE HAVE_CAPSTONE)
     get_filename_component(_capstone_lib_dir ${CAPSTONE_LIBRARY} DIRECTORY)
     get_filename_component(_capstone_bin_dir "${_capstone_lib_dir}/../bin" ABSOLUTE)
@@ -300,7 +300,7 @@ endif()
 
 # 链接 Keystone
 if(HAVE_KEYSTONE)
-    target_link_libraries(MiniMemClient ${KEYSTONE_LIBRARIES})
+    target_link_libraries(MiniMemClient PRIVATE ${KEYSTONE_LIBRARIES})
     target_compile_definitions(MiniMemClient PRIVATE HAVE_KEYSTONE)
     get_filename_component(_keystone_lib_dir ${KEYSTONE_LIBRARY} DIRECTORY)
     get_filename_component(_keystone_bin_dir "${_keystone_lib_dir}/../bin" ABSOLUTE)

@@ -37,6 +37,8 @@ private:
 
     void ServerThread();
     void HandleClient(uintptr_t clientSocket);
+    void CloseListenSocket();
+    void WakeAcceptLoop();
     std::string BuildHttpResponse(int statusCode, const std::string& body);
     json DispatchRequest(const json& request);
 
@@ -45,7 +47,7 @@ private:
 
     std::atomic<bool> running_{false};
     uint16_t port_ = 28100;
-    uintptr_t listenSocket_ = ~(uintptr_t)0; // INVALID_SOCKET
+    std::atomic<uintptr_t> listenSocket_{~(uintptr_t)0}; // INVALID_SOCKET
     std::thread serverThread_;
     std::unordered_map<std::string, Handler> handlers_;
 };

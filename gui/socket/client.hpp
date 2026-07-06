@@ -151,19 +151,23 @@ struct CeFindSymbolOutput {
 
 class WindowsSocketClient {
 private:
-    SOCKET sock_;
-    bool connected_;
+    SocketPlatform::ScopedSocket sock_;
+    bool connected_ = false;
+    bool platformStarted_ = false;
 
 public:
-    WindowsSocketClient() : sock_(INVALID_SOCKET), connected_(false) {
-        if (!SocketPlatform::Startup()) {
+    WindowsSocketClient() {
+        platformStarted_ = SocketPlatform::Startup();
+        if (!platformStarted_) {
             std::cerr << "Socket startup failed: " << SocketPlatform::LastError() << std::endl;
         }
     }
 
     ~WindowsSocketClient() {
         Close();
-        SocketPlatform::Cleanup();
+        if (platformStarted_) {
+            SocketPlatform::Cleanup();
+        }
     }
 
     bool Connect(const std::string& host, uint16_t port) {
@@ -171,8 +175,8 @@ public:
             Close();
         }
 
-        sock_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (sock_ == INVALID_SOCKET) {
+        sock_.reset(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
+        if (!sock_.valid()) {
             std::cerr << "socket() failed: " << SocketPlatform::LastError() << std::endl;
             return false;
         }
@@ -183,15 +187,13 @@ public:
 
         if (inet_pton(AF_INET, host.c_str(), &serverAddr.sin_addr) != 1) {
             std::cerr << "Invalid address: " << host << std::endl;
-            SocketPlatform::Close(sock_);
-            sock_ = INVALID_SOCKET;
+            sock_.reset();
             return false;
         }
 
-        if (connect(sock_, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+        if (connect(sock_.get(), (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
             std::cerr << "connect() failed: " << SocketPlatform::LastError() << std::endl;
-            SocketPlatform::Close(sock_);
-            sock_ = INVALID_SOCKET;
+            sock_.reset();
             return false;
         }
 
@@ -201,14 +203,14 @@ public:
     }
 
     bool Send(const void* data, size_t size) {
-        if (!connected_ || sock_ == INVALID_SOCKET) return false;
+        if (!connected_ || !sock_.valid()) return false;
 
-        SocketIoTimeout::SocketOptionTimeoutGuard timeoutGuard(sock_, SO_SNDTIMEO);
+        SocketIoTimeout::SocketOptionTimeoutGuard timeoutGuard(sock_.get(), SO_SNDTIMEO);
         const char* buffer = static_cast<const char*>(data);
         size_t totalSent = 0;
 
         while (totalSent < size) {
-            int sent = ::send(sock_, buffer + totalSent, static_cast<int>(size - totalSent), 0);
+            int sent = ::send(sock_.get(), buffer + totalSent, static_cast<int>(size - totalSent), 0);
             if (sent == SOCKET_ERROR) {
                 int err = SocketPlatform::LastError();
                 std::cerr << "send() failed: " << err << std::endl;
@@ -227,14 +229,14 @@ public:
     }
 
     bool Receive(void* buffer, size_t size) {
-        if (!connected_ || sock_ == INVALID_SOCKET) return false;
+        if (!connected_ || !sock_.valid()) return false;
 
-        SocketIoTimeout::SocketOptionTimeoutGuard timeoutGuard(sock_, SO_RCVTIMEO);
+        SocketIoTimeout::SocketOptionTimeoutGuard timeoutGuard(sock_.get(), SO_RCVTIMEO);
         char* buf = static_cast<char*>(buffer);
         size_t totalReceived = 0;
 
         while (totalReceived < size) {
-            int received = ::recv(sock_, buf + totalReceived, static_cast<int>(size - totalReceived), 0);
+            int received = ::recv(sock_.get(), buf + totalReceived, static_cast<int>(size - totalReceived), 0);
             if (received == SOCKET_ERROR) {
                 int err = SocketPlatform::LastError();
                 std::cerr << "recv() failed: " << err << std::endl;
@@ -259,19 +261,19 @@ public:
     }
 
     size_t DrainPending(size_t maxBytes = 16 * 1024 * 1024) {
-        if (!connected_ || sock_ == INVALID_SOCKET) return 0;
+        if (!connected_ || !sock_.valid()) return 0;
 
         std::vector<char> buffer(4096);
         size_t totalDrained = 0;
         while (totalDrained < maxBytes) {
             SocketPlatform::AvailableBytes pending = 0;
-            if (SocketPlatform::GetAvailableBytes(sock_, pending) == SOCKET_ERROR || pending <= 0) {
+            if (SocketPlatform::GetAvailableBytes(sock_.get(), pending) == SOCKET_ERROR || pending <= 0) {
                 break;
             }
 
             const size_t toRead = std::min<size_t>(
                 {buffer.size(), static_cast<size_t>(pending), maxBytes - totalDrained});
-            int received = ::recv(sock_, buffer.data(), static_cast<int>(toRead), 0);
+            int received = ::recv(sock_.get(), buffer.data(), static_cast<int>(toRead), 0);
             if (received == SOCKET_ERROR) {
                 std::cerr << "drain recv() failed: " << SocketPlatform::LastError() << std::endl;
                 break;
@@ -290,10 +292,7 @@ public:
     }
 
     void Close() {
-        if (sock_ != INVALID_SOCKET) {
-            SocketPlatform::Close(sock_);
-            sock_ = INVALID_SOCKET;
-        }
+        sock_.reset();
         connected_ = false;
     }
 

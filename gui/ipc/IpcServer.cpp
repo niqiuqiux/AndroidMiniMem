@@ -391,8 +391,8 @@ bool IpcServer::Start(uint16_t port) {
         return false;
     }
 
-    listenSocket_ = (uintptr_t)::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listenSocket_ == (uintptr_t)INVALID_SOCKET) {
+    listenSocket_.store((uintptr_t)::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
+    if (listenSocket_.load() == (uintptr_t)INVALID_SOCKET) {
         Gui::log("[IPC] 创建 socket 失败");
         SocketPlatform::Cleanup();
         return false;
@@ -400,25 +400,23 @@ bool IpcServer::Start(uint16_t port) {
 
     // 允许端口复用
     int opt = 1;
-    ::setsockopt((SOCKET)listenSocket_, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+    ::setsockopt((SOCKET)listenSocket_.load(), SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port_);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // 仅本地
 
-    if (::bind((SOCKET)listenSocket_, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
+    if (::bind((SOCKET)listenSocket_.load(), (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
         Gui::log("[IPC] 绑定端口 %d 失败", (int)port_);
-        SocketPlatform::Close((SOCKET)listenSocket_);
-        listenSocket_ = (uintptr_t)INVALID_SOCKET;
+        CloseListenSocket();
         SocketPlatform::Cleanup();
         return false;
     }
 
-    if (::listen((SOCKET)listenSocket_, SOMAXCONN) == SOCKET_ERROR) {
+    if (::listen((SOCKET)listenSocket_.load(), SOMAXCONN) == SOCKET_ERROR) {
         Gui::log("[IPC] listen 失败");
-        SocketPlatform::Close((SOCKET)listenSocket_);
-        listenSocket_ = (uintptr_t)INVALID_SOCKET;
+        CloseListenSocket();
         SocketPlatform::Cleanup();
         return false;
     }
@@ -433,25 +431,8 @@ void IpcServer::Stop() {
     running_.store(false);
     Gui::log("[IPC] 服务正在停止...");
 
-    if (listenSocket_ != (uintptr_t)INVALID_SOCKET) {
-        SocketPlatform::Shutdown((SOCKET)listenSocket_);
-    }
-
-    SOCKET wakeSocket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (wakeSocket != INVALID_SOCKET) {
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port_);
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        (void)::connect(wakeSocket, (sockaddr*)&addr, sizeof(addr));
-        SocketPlatform::Close(wakeSocket);
-    }
-
-    // 关闭监听 socket 以唤醒 accept()
-    if (listenSocket_ != (uintptr_t)INVALID_SOCKET) {
-        SocketPlatform::Close((SOCKET)listenSocket_);
-        listenSocket_ = (uintptr_t)INVALID_SOCKET;
-    }
+    WakeAcceptLoop();
+    CloseListenSocket();
 
     if (serverThread_.joinable())
         serverThread_.join();
@@ -459,9 +440,37 @@ void IpcServer::Stop() {
     SocketPlatform::Cleanup();
 }
 
+void IpcServer::CloseListenSocket() {
+    const uintptr_t socket = listenSocket_.exchange((uintptr_t)INVALID_SOCKET);
+    if (socket == (uintptr_t)INVALID_SOCKET) {
+        return;
+    }
+
+    SocketPlatform::Close((SOCKET)socket);
+}
+
+void IpcServer::WakeAcceptLoop() {
+    SocketPlatform::ScopedSocket wakeSocket(
+        ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
+    if (!wakeSocket.valid()) {
+        return;
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port_);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    (void)::connect(wakeSocket.get(), (sockaddr*)&addr, sizeof(addr));
+}
+
 void IpcServer::ServerThread() {
     while (true) {
-        SOCKET client = ::accept((SOCKET)listenSocket_, nullptr, nullptr);
+        const uintptr_t listenSocket = listenSocket_.load();
+        if (listenSocket == (uintptr_t)INVALID_SOCKET) {
+            break;
+        }
+
+        SOCKET client = ::accept((SOCKET)listenSocket, nullptr, nullptr);
         if (client == INVALID_SOCKET) break;
         if (!running_.load()) {
             SocketPlatform::Close(client);
@@ -477,7 +486,8 @@ void IpcServer::ServerThread() {
 
 // ── HTTP 处理 ────────────────────────────────────────────────────
 void IpcServer::HandleClient(uintptr_t clientSocket) {
-    SOCKET sock = (SOCKET)clientSocket;
+    SocketPlatform::ScopedSocket client((SOCKET)clientSocket);
+    SOCKET sock = client.get();
 
     // 设置超时
     auto timeout = SocketPlatform::MakeTimeoutValue(5000);
@@ -570,7 +580,6 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
         json response = {{"success", false}, {"error", earlyError}};
         std::string httpResp = BuildHttpResponse(earlyStatusCode, response.dump());
         ::send(sock, httpResp.c_str(), (int)httpResp.size(), 0);
-        SocketPlatform::Close(sock);
         return;
     }
 
@@ -580,7 +589,6 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
                                                        : earlyError}};
         std::string httpResp = BuildHttpResponse(400, response.dump());
         ::send(sock, httpResp.c_str(), (int)httpResp.size(), 0);
-        SocketPlatform::Close(sock);
         return;
     }
 
@@ -588,7 +596,6 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
         json response = {{"success", false}, {"error", "HTTP request too large"}};
         std::string httpResp = BuildHttpResponse(413, response.dump());
         ::send(sock, httpResp.c_str(), (int)httpResp.size(), 0);
-        SocketPlatform::Close(sock);
         return;
     }
 
@@ -600,7 +607,6 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
                          {"error", "Incomplete HTTP request body"}};
         std::string httpResp = BuildHttpResponse(400, response.dump());
         ::send(sock, httpResp.c_str(), (int)httpResp.size(), 0);
-        SocketPlatform::Close(sock);
         return;
     }
 
@@ -616,7 +622,6 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
             "Access-Control-Allow-Headers: Content-Type\r\n"
             "Content-Length: 0\r\n\r\n";
         ::send(sock, resp.c_str(), (int)resp.size(), 0);
-        SocketPlatform::Close(sock);
         return;
     }
 
@@ -638,7 +643,6 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
 
     std::string httpResp = BuildHttpResponse(statusCode, response.dump());
     ::send(sock, httpResp.c_str(), (int)httpResp.size(), 0);
-    SocketPlatform::Close(sock);
 }
 
 std::string IpcServer::BuildHttpResponse(int statusCode, const std::string& body) {

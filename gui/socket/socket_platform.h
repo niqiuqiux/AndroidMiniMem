@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -18,13 +19,46 @@ using SocketOptionLength = int;
 using SocketTimeoutValue = DWORD;
 using AvailableBytes = u_long;
 
+struct StartupState {
+    std::mutex mutex;
+    uint32_t refCount = 0;
+};
+
+inline StartupState& GetStartupState() {
+    static StartupState state;
+    return state;
+}
+
 inline bool Startup() {
+    auto& state = GetStartupState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (state.refCount > 0) {
+        ++state.refCount;
+        return true;
+    }
+
     WSADATA wsaData{};
-    return WSAStartup(MAKEWORD(2, 2), &wsaData) == 0;
+    const int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (result != 0) {
+        WSASetLastError(result);
+        return false;
+    }
+
+    state.refCount = 1;
+    return true;
 }
 
 inline void Cleanup() {
-    WSACleanup();
+    auto& state = GetStartupState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (state.refCount == 0) {
+        return;
+    }
+
+    --state.refCount;
+    if (state.refCount == 0) {
+        WSACleanup();
+    }
 }
 
 inline int LastError() {
@@ -85,7 +119,10 @@ using SocketTimeoutValue = timeval;
 using AvailableBytes = int;
 
 inline bool Startup() {
-    std::signal(SIGPIPE, SIG_IGN);
+    static std::once_flag signalOnce;
+    std::call_once(signalOnce, [] {
+        std::signal(SIGPIPE, SIG_IGN);
+    });
     return true;
 }
 
@@ -131,3 +168,44 @@ inline const char* OptionData(const SocketTimeoutValue& value) {
 } // namespace SocketPlatform
 
 #endif
+
+namespace SocketPlatform {
+
+class ScopedSocket {
+public:
+    explicit ScopedSocket(SOCKET socket = INVALID_SOCKET) : socket_(socket) {}
+    ~ScopedSocket() { reset(); }
+
+    ScopedSocket(const ScopedSocket&) = delete;
+    ScopedSocket& operator=(const ScopedSocket&) = delete;
+
+    ScopedSocket(ScopedSocket&& other) noexcept : socket_(other.release()) {}
+
+    ScopedSocket& operator=(ScopedSocket&& other) noexcept {
+        if (this != &other) {
+            reset(other.release());
+        }
+        return *this;
+    }
+
+    SOCKET get() const { return socket_; }
+    bool valid() const { return socket_ != INVALID_SOCKET; }
+
+    SOCKET release() {
+        const SOCKET socket = socket_;
+        socket_ = INVALID_SOCKET;
+        return socket;
+    }
+
+    void reset(SOCKET socket = INVALID_SOCKET) {
+        if (socket_ != INVALID_SOCKET) {
+            Close(socket_);
+        }
+        socket_ = socket;
+    }
+
+private:
+    SOCKET socket_ = INVALID_SOCKET;
+};
+
+} // namespace SocketPlatform
