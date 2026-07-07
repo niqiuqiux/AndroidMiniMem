@@ -36,7 +36,7 @@ bool DisassemblyHelper::initialize(Architecture arch) {
     switch (arch) {
         case Architecture::ARM64:
             // Capstone 4 使用 CS_ARCH_ARM64，较新版本可使用 CS_ARCH_AARCH64。
-            #ifdef CS_ARCH_AARCH64
+            #if defined(CS_API_MAJOR) && CS_API_MAJOR >= 6 && !defined(CAPSTONE_AARCH64_COMPAT_HEADER)
                 err = cs_open(CS_ARCH_AARCH64, CS_MODE_ARM, &handle);
             #else
                 err = cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &handle);
