@@ -33,6 +33,7 @@ CMD_KERNEL_READHWBPINFO      = 17
 CMD_SYMBOL_INIT              = 18
 CMD_SYMBOL_GETLIST           = 19
 CMD_SYMBOL_FIND              = 20
+CMD_GETSOBASE                = 21
 
 # ── 数据类型 (MemoryTypes.h TYPE enum) ───────────────────────────
 TYPE_BYTE   = 1
@@ -42,6 +43,12 @@ TYPE_XOR    = 8
 TYPE_FLOAT  = 16
 TYPE_QWORD  = 32
 TYPE_DOUBLE = 64
+
+
+def require_so_name(name: str) -> str:
+    if not name or ".so" not in name:
+        raise ValueError("so name must include '.so'")
+    return name
 
 
 def encode_value(value, data_type: str) -> bytes:
@@ -218,6 +225,19 @@ class AMemClient:
                 name = self._recv_all(nlen).decode("utf-8", errors="replace") if nlen > 0 else ""
                 result.append(ModuleInfo(mbase, msize, mtype, mflag, name))
             return result
+
+    def get_so_base(self, name: str) -> int:
+        with self._lock:
+            name = require_so_name(name)
+            name_bytes = name.encode("utf-8")
+            self._send_cmd(CMD_GETSOBASE)
+            self._send_all(struct.pack("<Ii", self._handle, len(name_bytes)))
+            if name_bytes:
+                self._send_all(name_bytes)
+            result, base = struct.unpack("<iQ", self._recv_all(12))
+            if result != 0:
+                return 0
+            return base
 
     def symbol_init(self, module_base: int) -> int:
         with self._lock:

@@ -46,6 +46,9 @@
 #define CMD_SYMBOL_GETLIST           19
 #define CMD_SYMBOL_FIND              20
 
+// —— 模块快捷查询 ——
+#define CMD_GETSOBASE                21
+
 
 #pragma pack(1)
 struct CeVersion {
@@ -145,6 +148,16 @@ struct CeFindSymbolInput {
 struct CeFindSymbolOutput {
     int result;
     uint64_t address;
+};
+
+struct CeGetSoBaseInput {
+    uint32_t hProcess;
+    int nameSize;
+};
+
+struct CeGetSoBaseOutput {
+    int result;
+    uint64_t base;
 };
 
 #pragma pack()

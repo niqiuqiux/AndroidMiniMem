@@ -226,6 +226,7 @@ public:
 
 	static void GetProcessListInfo(std::vector<MyProcessInfo>& vOutput);
 	static void GetModuleList(HANDLE hProcess,std::vector<ModuleListEntry>& vOutput);
+	static uint64_t GetSoBase(HANDLE hProcess, const std::string& soName);
 
 	// 断点与调试控制（内核硬件断点）
 	static int SetBreakpoint(HANDLE hProcess,  uint64_t address, int bpType, int bpSize);

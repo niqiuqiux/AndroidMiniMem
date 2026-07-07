@@ -38,6 +38,7 @@ public:
     bool GetPidList(std::vector<int>& out);
     bool GetProcessCmdline(int pid, char* out, size_t outSize);
     bool GetProcessComm(int pid, char* out, size_t outSize);
+    uint64_t GetSoBaseAddress(int pid, const std::string& soName);
 
     uint64_t AddHardwareBreakpoint(int tid, uint64_t address, unsigned int len, unsigned int type);
     bool RemoveHardwareBreakpoint(uint64_t handle);

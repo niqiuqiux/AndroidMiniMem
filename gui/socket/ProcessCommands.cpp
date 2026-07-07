@@ -11,6 +11,7 @@ constexpr int kMaxModuleCount = 65536;
 constexpr int kMaxModuleNameSize = 64 * 1024;
 constexpr int kMaxDriverCardSize = 4096;
 constexpr int kMaxDriverResponseSize = 64 * 1024;
+constexpr size_t kMaxSoNameSize = 4096;
 
 bool isValidCount(int value, int maxValue) {
     return value >= 0 && value <= maxValue;
@@ -39,6 +40,25 @@ bool addAddressOffset(uint64_t base, uint64_t offset, uint64_t& out) {
         return false;
     out = base + offset;
     return true;
+}
+
+bool isSharedObjectName(const std::string& moduleName) {
+    return !moduleName.empty() &&
+           moduleName.size() <= kMaxSoNameSize &&
+           moduleName.find(".so") != std::string::npos;
+}
+
+std::string baseNameOf(const std::string& path) {
+    size_t slash = path.find_last_of("/\\");
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+bool moduleNameExactMatch(const ModuleInfoItem& module, const std::string& moduleName) {
+    return module.name == moduleName || baseNameOf(module.name) == moduleName;
+}
+
+bool moduleFlagMatch(const ModuleInfoItem& module, int requiredFlag) {
+    return requiredFlag < 0 || module.flag == requiredFlag;
 }
 } // namespace
 
@@ -217,35 +237,72 @@ bool FetchModuleList(std::vector<ModuleInfoItem> &outList, PortType type) {
     });
 }
 
-bool GetModuleBaseByName(const std::string &moduleName, uint64_t &outBase, PortType port) {
+bool GetSoBaseByName(const std::string &moduleName, uint64_t &outBase, PortType port) {
     auto* client = GetSocketMgr().GetClient(port);
     if (!client || !client->IsConnected())
         return false;
+    if (!isSharedObjectName(moduleName))
+        return false;
+
+    bool found = false;
+    uint64_t base = 0;
+    bool commandOk = SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+        unsigned char command = CMD_GETSOBASE;
+        if (!client->Send(&command, sizeof(command)))
+            return false;
+        CeGetSoBaseInput input{};
+        input.hProcess = static_cast<uint32_t>(handle);
+        input.nameSize = static_cast<int>(moduleName.size());
+        if (!client->Send(&input, sizeof(input)))
+            return false;
+        if (!client->Send(moduleName.data(), moduleName.size()))
+            return false;
+        CeGetSoBaseOutput output{};
+        if (!client->Receive(&output, sizeof(output)))
+            return false;
+        if (output.result == 0 && output.base != 0) {
+            found = true;
+            base = output.base;
+        }
+        return true;
+    });
+    if (!commandOk || !found)
+        return false;
+    outBase = base;
+    return true;
+}
+
+bool FindModuleSegmentsByName(const std::string &moduleName,
+                              std::vector<ModuleInfoItem> &outList,
+                              PortType port,
+                              int requiredFlag) {
+    outList.clear();
+    if (moduleName.empty())
+        return false;
+
     std::vector<ModuleInfoItem> mods;
     if (!FetchModuleList(mods, port))
         return false;
 
-    // 一个模块通常有多个段(r-x/r--/rw-)，加载基址=其中最小的那个(ELF 头所在段)。
-    // 优先按 basename 精确匹配，避免 "libc.so" 误命中 "libc.so.6" 等子串；
-    // 若无精确匹配，回退到子串匹配（兼容传入完整路径/部分名）。同样取最小基址。
-    uint64_t exactBase = UINT64_MAX, subBase = UINT64_MAX;
-    bool exact = false, sub = false;
     for (const auto &m : mods) {
-        std::string bn = m.name;
-        size_t slash = bn.find_last_of("/\\");
-        if (slash != std::string::npos)
-            bn = bn.substr(slash + 1);
-        if (bn == moduleName) {
-            exact = true;
-            if (m.base < exactBase) exactBase = m.base;
-        } else if (m.name.find(moduleName) != std::string::npos) {
-            sub = true;
-            if (m.base < subBase) subBase = m.base;
+        if (moduleNameExactMatch(m, moduleName) && moduleFlagMatch(m, requiredFlag)) {
+            outList.push_back(m);
         }
     }
-    if (exact) { outBase = exactBase; return true; }
-    if (sub)   { outBase = subBase;  return true; }
-    return false;
+    if (!outList.empty())
+        return true;
+
+    // 兼容传入部分路径/部分名的旧用法；只在没有精确匹配时回退子串匹配。
+    for (const auto &m : mods) {
+        if (m.name.find(moduleName) != std::string::npos && moduleFlagMatch(m, requiredFlag)) {
+            outList.push_back(m);
+        }
+    }
+    return !outList.empty();
+}
+
+bool GetModuleBaseByName(const std::string &moduleName, uint64_t &outBase, PortType port) {
+    return GetSoBaseByName(moduleName, outBase, port);
 }
 
 // 本项目仅支持 arm64，指针恒为 8 字节小端

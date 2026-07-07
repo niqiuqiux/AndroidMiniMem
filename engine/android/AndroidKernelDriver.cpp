@@ -266,6 +266,20 @@ bool AndroidKernelDriver::GetProcessComm(int pid, char* out, size_t outSize) {
     return !value.empty();
 }
 
+uint64_t AndroidKernelDriver::GetSoBaseAddress(int pid, const std::string& soName) {
+    if (pid <= 0 || soName.empty()) {
+        return 0;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    NiDriver* d = driverLocked();
+    if (!d) {
+        return 0;
+    }
+
+    return d->get_so_base_address(pid, soName);
+}
+
 uint64_t AndroidKernelDriver::AddHardwareBreakpoint(int tid,
                                                     uint64_t address,
                                                     unsigned int len,

@@ -601,6 +601,31 @@ int DispatchCommand_V2(Ioserver *IOserver, unsigned char command) {
     break;
   }
 
+  case CMD_GETSOBASE: {
+    LOGD("CMD_GETSOBASE V2");
+    CeGetSoBaseInput input;
+    if (IOserver->Receive(&input, sizeof(input)) <= 0) {
+      CeGetSoBaseOutput output = {-1, 0};
+      IOserver->Send(&output, sizeof(output));
+      break;
+    }
+
+    CeGetSoBaseOutput output = {-1, 0};
+    if (input.nameSize > 0 && input.nameSize <= 4096) {
+      std::vector<char> nameBuf(input.nameSize);
+      if (IOserver->Receive(nameBuf.data(), input.nameSize) > 0) {
+        std::string soName(nameBuf.data(), input.nameSize);
+        uint64_t base = CApi::GetSoBase(input.hProcess, soName);
+        if (base != 0) {
+          output.result = 0;
+          output.base = base;
+        }
+      }
+    }
+    IOserver->Send(&output, sizeof(output));
+    break;
+  }
+
   default: {
     LOGDF("Unknow command:%d", command);
     // printf("Unknow command:%d", command);

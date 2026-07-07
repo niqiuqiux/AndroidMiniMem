@@ -53,6 +53,9 @@
 #define CMD_SYMBOL_GETLIST           19  // 分页获取符号列表
 #define CMD_SYMBOL_FIND              20  // 按名称查找符号
 
+// —— 模块快捷查询 ——
+#define CMD_GETSOBASE                21  // 按 so 名称获取模块基址
+
 // ============================================================================
 // 协议结构体
 // ============================================================================
@@ -159,6 +162,19 @@ struct CeFindSymbolInput {
 struct CeFindSymbolOutput {
 	int result;             // 0=找到, -1=未找到
 	uint64_t address;       // 符号地址
+};
+
+// 按名称查找 so 基址输入 (CMD_GETSOBASE)
+struct CeGetSoBaseInput {
+	HANDLE hProcess;
+	int nameSize;           // so 名称长度
+	// 后跟 so 名称字符串
+};
+
+// 按名称查找 so 基址输出
+struct CeGetSoBaseOutput {
+	int result;             // 0=找到, -1=未找到
+	uint64_t base;          // so 基址
 };
 
 #pragma pack()

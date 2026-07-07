@@ -132,6 +132,12 @@ bool EnsureOpenHandle(int &outHandle, PortType type = PORT_MAIN);
 bool CloseProcessHandle(int handle, PortType type = PORT_MAIN);
 bool FetchModuleList(std::vector<ModuleInfoItem> &outList,
                      PortType type = PORT_MAIN);
+bool GetSoBaseByName(const std::string &moduleName, uint64_t &outBase,
+                     PortType type = PORT_MAIN);
+bool FindModuleSegmentsByName(const std::string &moduleName,
+                              std::vector<ModuleInfoItem> &outList,
+                              PortType type = PORT_MAIN,
+                              int requiredFlag = -1);
 
 // Memory helpers
 bool ReadProcessMemoryBytes(uint64_t address, uint32_t size,

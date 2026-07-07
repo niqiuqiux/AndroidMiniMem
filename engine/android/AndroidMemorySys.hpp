@@ -257,6 +257,11 @@ public:
         return LinuxProc::GetProcessMaps(pid_);
     }
 
+    uint64_t GetSoBase(const std::string& name) const override {
+        if (pid_ <= 0 || name.empty()) return 0;
+        return LinuxProc::GetModBase(pid_, name);
+    }
+
     ProcessMap GetAddressMap(uintptr_t address) const override {
         auto maps = GetProcessMaps();
         for (const auto& map : maps) {
@@ -282,4 +287,4 @@ public:
     bool GetCardTime(uint64_t& outCardTime) override {
         return false;
     }
-}; 
+};

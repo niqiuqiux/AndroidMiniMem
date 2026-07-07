@@ -265,8 +265,8 @@ VS Code 的 MCP 配置 key 是 `servers` 而不是 `mcpServers`。放置于项�
 | `list_processes()` | 列出 Android 设备上所有运行中的进程 |
 | `open_process(pid)` | 打开指定 PID 的进程，后续操作针对此进程 |
 | `list_modules(filter, offset, count)` | 列出当前进程加载的模块 |
-| `get_module_base(module_name)` | 获取指定模块的基址 |
-| `resolve_offset_chain(module, base_offset, offsets, deref_final)` | 解析指针链 |
+| `get_module_base(module_name)` | 获取指定 `.so` 模块的基址（名称必须包含 `.so`） |
+| `resolve_offset_chain(module, base_offset, offsets, deref_final)` | 基于指定 `.so` 解析指针链 |
 
 ### 内存读写
 
@@ -277,7 +277,7 @@ VS Code 的 MCP 配置 key 是 `servers` 而不是 `mcpServers`。放置于项�
 | `write_value(address, value, data_type="dword")` | — | 写入单个值 |
 | `write_bytes(address, hex_string)` | 如 `"90 90 90"` | 写入原始字节 |
 
-> 注：精简版**不含**数据搜索 / 指针扫描 / 冻结工具。定位地址请用 `get_module_base` + `resolve_offset_chain`，或用 `execute_lua` 写分析脚本。
+> 注：精简版**不含**数据搜索 / 指针扫描 / 冻结工具。`.so` 定位请用 `get_module_base` + `resolve_offset_chain`；非 `.so` 或匿名段（例如同名同权限的 heap/anon 段）请用 `list_modules` 查看具体段信息，避免把首个匹配段误当作模块基址。
 
 ### 硬件断点
 

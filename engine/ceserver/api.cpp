@@ -810,6 +810,18 @@ void CApi::GetModuleList(HANDLE hProcess,std::vector<ModuleListEntry>& vOutput){
 
  }
 
+uint64_t CApi::GetSoBase(HANDLE hProcess, const std::string& soName) {
+	if (soName.empty()) {
+		return 0;
+	}
+	if (CPortHelper::GetHandleType(hProcess) != htProcesHandle) {
+		return 0;
+	}
+
+	std::shared_lock<std::shared_mutex> rlock(g_globalMutex);
+	return g_memIO->GetSoBase(soName);
+}
+
 
 //================断点相关================
 

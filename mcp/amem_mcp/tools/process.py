@@ -11,6 +11,15 @@ from ..ipc_client import IpcClient
 MAX_OFFSET_CHAIN_LENGTH = 1024
 
 
+def _require_so_name(module_name: str) -> str:
+    name = str(module_name).strip()
+    if not name:
+        raise ValueError("module_name must not be empty")
+    if ".so" not in name:
+        raise ValueError("module_name must include '.so'; use list_modules for non-so memory segments")
+    return name
+
+
 def register(mcp: FastMCP, ipc: IpcClient) -> None:
 
     @mcp.tool()
@@ -73,8 +82,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         Args:
             module_name: 模块名称
         """
-        if not module_name.strip():
-            raise ValueError("module_name must not be empty")
+        module_name = _require_so_name(module_name)
         r = ipc.call_or_raise("get_module_base", {"name": module_name})
         return f"模块 {module_name} 基址: {r['base']}"
 
@@ -93,8 +101,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             offsets: 偏移链列表，如 [0x10, 0x20, 0x8]
             deref_final: 是否解引用最终地址，默认 True
         """
-        if not module.strip():
-            raise ValueError("module must not be empty")
+        module = _require_so_name(module)
         parse_int(base_offset)
         if offsets is not None and not isinstance(offsets, list):
             raise ValueError("offsets must be a list")

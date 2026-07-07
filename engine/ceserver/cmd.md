@@ -35,6 +35,7 @@
 | CMD_SYMBOL_INIT | 18 | 初始化模块符号表 | 参数: `CeSymbolInitInput`；返回: `CeSymbolInitOutput`(result, totalCount) |
 | CMD_SYMBOL_GETLIST | 19 | 分页获取符号列表 | 参数: `CeGetSymbolListInput`；返回: `CeGetSymbolListOutput` + N×(`CeSymbolEntry`+名称) |
 | CMD_SYMBOL_FIND | 20 | 按名称查找 ELF 符号 | 参数: `CeFindSymbolInput` + 名称；返回: `CeFindSymbolOutput`(result, address) |
+| CMD_GETSOBASE | 21 | 按 so 名称获取模块基址 | 参数: `CeGetSoBaseInput` + 名称；返回: `CeGetSoBaseOutput`(result, base) |
 
 > 断点类型 `type`：1=读 / 2=写 / 3=读写 / 4=执行（执行断点长度固定 4）。
 
@@ -58,7 +59,7 @@
 1. `CMD_GETVERSION` → 校验版本
 2. `CMD_GETMEMTYPE` / `CMD_INITRWDRIVER` → 查询 / 切换读写模式
 3. `CMD_GETPROCESSLIST` → 选进程 → `CMD_OPENPROCESS` 取句柄
-4. `CMD_GETMODULELIST` → 取模块基址
+4. `CMD_GETSOBASE` 或 `CMD_GETMODULELIST` → 取模块基址
 5. `CMD_READPROCESSMEMORY` / `CMD_WRITEPROCESSMEMORY` / `CMD_READBRATCHMEMORY` → 读写内存
 6. `CMD_KERNEL_SETBREAKPOINT` → 下断点 → `CMD_KERNEL_READHWBPINFO` 轮询命中
 7. `CMD_SYMBOL_INIT` → `CMD_SYMBOL_FIND` / `CMD_SYMBOL_GETLIST` → 解析 ELF 符号

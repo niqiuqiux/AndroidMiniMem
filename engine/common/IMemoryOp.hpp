@@ -50,8 +50,9 @@ public:
 
     virtual std::vector<std::pair<int, std::string>> GetProcessPidList() = 0;
     virtual std::vector<ProcessMap> GetProcessMaps() const = 0;
+    virtual uint64_t GetSoBase(const std::string& name) const = 0;
     virtual ProcessMap GetAddressMap(uintptr_t address) const = 0;
     virtual std::vector<ProcessMap> FindMapsByName(const std::string& name) const = 0;
 
     virtual bool GetCardTime(uint64_t& outCardTime) = 0;
-}; 
+};

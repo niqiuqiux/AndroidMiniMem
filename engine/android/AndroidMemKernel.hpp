@@ -292,6 +292,11 @@ public:
         return maps;
     }
 
+    uint64_t GetSoBase(const std::string& name) const override {
+        if (pid_ <= 0 || name.empty()) return 0;
+        return driver_.GetSoBaseAddress(pid_, name);
+    }
+
     ProcessMap GetAddressMap(uintptr_t address) const override {
         auto maps = GetProcessMaps();
         for (const auto& map : maps) {
