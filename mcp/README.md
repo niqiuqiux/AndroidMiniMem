@@ -1,6 +1,6 @@
 # AMem MCP Server
 
-AMem MCP Server 是一个基于 [Model Context Protocol](https://modelcontextprotocol.io/) 的服务，通过 HTTP 代理模式桥接 AMem GUI 内嵌的 IPC Server，将 GUI 的全部 C++ 能力暴露为 MCP 工具，供 AI 助手（Claude Code / Claude Desktop / Codex CLI / Cursor / VS Code Copilot / Continue 等）直接调用。
+AMem MCP Server 是一个基于 [Model Context Protocol](https://modelcontextprotocol.io/) 的服务。它对 AI 助手暴露 MCP 工具，对内通过 HTTP JSON 代理到 AMem GUI 内嵌的 IPC Server，从而把 GUI 的 C++ 能力暴露给 Claude Code / Claude Desktop / Codex CLI / Cursor / VS Code Copilot / Continue 等客户端。
 
 ## 架构
 
@@ -10,7 +10,25 @@ AI 助手  ←── stdio ──→  amem-mcp (Python)  ←── HTTP JSON ─
                                                                  Android 设备
 ```
 
-MCP Server 本身不直接与 Android 设备通信，所有操作都委托给 AMem GUI 的 IPC Server（默认监听 `127.0.0.1:28100`）。
+MCP Server 本身不直接与 Android 设备通信，所有操作都委托给 AMem GUI 的 IPC Server（默认监听 `127.0.0.1:28100`）。默认业务路径是 HTTP JSON 代理路径：MCP 工具收到调用后，会把请求转成 HTTP JSON 发给 GUI IPC Server。
+
+### 协议分层说明
+
+这里有两层通信，容易混淆：
+
+| 连接 | 协议 / 传输 | 说明 |
+|------|-------------|------|
+| AI 助手 ↔ `amem-mcp` | MCP over `stdio` | IDE/Codex 启动本地 Python 进程，通过标准输入输出交换 MCP 消息 |
+| `amem-mcp` ↔ AMem GUI IPC Server | HTTP JSON | 默认业务路径。MCP 工具内部把请求转发到 GUI 的 IPC Server，默认地址 `http://127.0.0.1:28100` |
+
+因此 `.mcp.json` / `~/.codex/config.toml` 里配置的是第一层：用 `command` 启动 `amem-mcp`，不是填 HTTP URL。真正访问 AMem 的默认路径是第二层 HTTP JSON，地址通过 `AMEM_IPC_HOST` / `AMEM_IPC_PORT` 或 `--ipc-host` / `--ipc-port` 指定。
+
+当前 Python MCP 入口仅支持 `stdio`：
+
+```bash
+amem-mcp --transport stdio
+python -m amem_mcp --transport stdio
+```
 
 ## 环境要求
 
@@ -51,13 +69,46 @@ amem-mcp --ipc-host 127.0.0.1 --ipc-port 28100 # 指定 IPC 地址
 
 也支持环境变量 `AMEM_IPC_HOST` / `AMEM_IPC_PORT`（对 IDE 配置很有用）。
 
+### 路径与环境变量
+
+如果已经执行 `pip install -e .`，推荐在 IDE 配置中直接使用：
+
+```json
+{ "command": "amem-mcp" }
+```
+
+如果没有安装包，需要用 `PYTHONPATH` 指向本项目的 `mcp` 目录，然后用模块方式启动：
+
+```json
+{
+  "command": "python",
+  "args": ["-m", "amem_mcp"],
+  "env": {
+    "PYTHONPATH": "D:/AndroidMEM/AndroidMiniMem/mcp",
+    "AMEM_IPC_HOST": "127.0.0.1",
+    "AMEM_IPC_PORT": "28100"
+  }
+}
+```
+
+路径要按运行客户端的系统填写：
+
+| 环境 | `PYTHONPATH` 示例 |
+|------|-------------------|
+| Windows 原生 IDE | `D:/AndroidMEM/AndroidMiniMem/mcp` |
+| WSL / Linux Codex | `/home/qiu/桌面/MEMTool/AndroidMiniMem/mcp` |
+
+`AMEM_IPC_HOST` / `AMEM_IPC_PORT` 指的是 AMem GUI IPC Server 地址，不是 MCP Server 的监听地址。
+
 ---
 
 ## IDE 接入
 
-每个 IDE 需要的配置格式不同。`configs/` 目录下提供了全部样例，复制即可用。
+每个 IDE 需要的配置格式不同。`configs/` 目录下提供了全部样例，复制后按本机路径调整即可用。
 
 > 以下示例假设用的是**可编辑安装**，推荐把 `command: "python", args: ["-m", "amem_mcp"]` 改为 `command: "amem-mcp"` 并删除 `args`、`env.PYTHONPATH`。
+
+> 注意：这些 IDE 配置都是 `stdio` MCP。不要把 `http://127.0.0.1:28100` 写成 MCP URL；它只是 `amem-mcp` 内部访问 GUI IPC 的地址。
 
 ### Claude Code
 
@@ -68,7 +119,10 @@ amem-mcp --ipc-host 127.0.0.1 --ipc-port 28100 # 指定 IPC 地址
   "mcpServers": {
     "amem": {
       "command": "amem-mcp",
-      "env": { "AMEM_IPC_PORT": "28100" }
+      "env": {
+        "AMEM_IPC_HOST": "127.0.0.1",
+        "AMEM_IPC_PORT": "28100"
+      }
     }
   }
 }
@@ -82,7 +136,11 @@ amem-mcp --ipc-host 127.0.0.1 --ipc-port 28100 # 指定 IPC 地址
     "amem": {
       "command": "python",
       "args": ["-m", "amem_mcp"],
-      "env": { "PYTHONPATH": "D:/AndroidMEM/AndroidMiniMem/mcp" }
+      "env": {
+        "PYTHONPATH": "D:/AndroidMEM/AndroidMiniMem/mcp",
+        "AMEM_IPC_HOST": "127.0.0.1",
+        "AMEM_IPC_PORT": "28100"
+      }
     }
   }
 }
@@ -113,10 +171,24 @@ amem-mcp --ipc-host 127.0.0.1 --ipc-port 28100 # 指定 IPC 地址
 command = "amem-mcp"
 
 [mcp_servers.amem.env]
+AMEM_IPC_HOST = "127.0.0.1"
 AMEM_IPC_PORT = "28100"
 ```
 
-注意 Codex 的 key 是 `mcp_servers`（下划线），不是 JSON 系列的 `mcpServers`。
+如果没有安装包：
+
+```toml
+[mcp_servers.amem]
+command = "python"
+args = ["-m", "amem_mcp"]
+
+[mcp_servers.amem.env]
+PYTHONPATH = "/home/qiu/桌面/MEMTool/AndroidMiniMem/mcp"
+AMEM_IPC_HOST = "127.0.0.1"
+AMEM_IPC_PORT = "28100"
+```
+
+注意 Codex 的 key 是 `mcp_servers`（下划线），不是 JSON 系列的 `mcpServers`。Codex 目前读取用户级 `~/.codex/config.toml`，不会自动读取项目根目录的 `.mcp.json`。
 
 模板：[`configs/codex.toml`](./configs/codex.toml)
 
@@ -159,7 +231,7 @@ VS Code 的 MCP 配置 key 是 `servers` 而不是 `mcpServers`。放置于项�
 
 ## 通信协议
 
-MCP Server 通过 HTTP POST 向 IPC Server 发送 JSON 请求：
+本节描述默认业务通信路径：`amem-mcp` 内部通过 HTTP POST 向 AMem GUI IPC Server 发送 JSON 请求。MCP 客户端本身仍然通过 `stdio` 调用 `amem-mcp`，但所有进程、模块、内存、断点、Lua、符号等工具最终默认都会走这条 HTTP JSON 代理路径。
 
 ```json
 // 请求
@@ -170,6 +242,8 @@ MCP Server 通过 HTTP POST 向 IPC Server 发送 JSON 请求：
 ```
 
 默认 30 秒超时，扫描类操作 60 秒。仅支持本地回环地址。
+
+`reference/` 目录里的二进制协议客户端只作为历史/参考实现保留，MCP Server 默认不使用它。
 
 ---
 

@@ -49,7 +49,7 @@
 
 ## 4. 内核切换
 
-`CMD_INITRWDRIVER` 是内核切换的入口：服务端尝试通过 anon_fd 连接已加载的内核驱动，或用 `finit_module` 加载 `Mem.ko`（5 系另需 `CFI.ko`），成功后把全局内存读写实现 `g_memIO` 从默认的 `AndroidMemorySys`（syscall 模式）热替换为 `AndroidMemKernel`（内核模式）。`CMD_GETMEMTYPE` 查询当前所处模式。
+`CMD_INITRWDRIVER` 是内核切换的入口：服务端尝试通过 newkernelmem 的 anon_fd 通道连接已加载的 `NI` 驱动，并通过 `NI_IOCTL_GET_PROTOCOL_INFO` 校验协议；连接失败时用 `finit_module` 加载 `NI.ko`（优先当前目录，其次 `/data/local/tmp/NI.ko`）。成功后把全局内存读写实现 `g_memIO` 从默认的 `AndroidMemorySys`（syscall 模式）热替换为 `AndroidMemKernel`（内核模式）。`CMD_GETMEMTYPE` 查询当前所处模式。
 
 > **硬件断点支持两种后端，对协议透明**：内核模式（已 `CMD_INITRWDRIVER` 切换）经内核驱动下发；非内核模式自动回退到**用户态 `perf_event_open`** 引擎（`android/PerfHwBreakpoint.hpp`）。两种后端的命令字 / 参数 / 返回完全一致，前端无需区分；按断点 handle 归属自动分发。
 

@@ -40,7 +40,7 @@
 #include <vector>
 #include <algorithm>
 
-#include "MemoryReaderWriter.h"   // 复用 HW_HIT_ITEM / my_user_pt_regs / 断点枚举
+#include "AndroidDriverTypes.h"
 #include "Logger.hpp"
 
 // PERF_REG_ARM64_MAX 来自 <asm/perf_regs.h>（aarch64 = 33：x0..x29 + lr + sp + pc）。

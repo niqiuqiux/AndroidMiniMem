@@ -100,13 +100,14 @@ target_link_libraries(common_interface INTERFACE
 
 # ----------------------------------------------------------------------------
 # 服务器核心静态库
-#   CE 协议分发(CEServer/porthelp) + API 实现(api) + 内核读写驱动(MemoryReaderWriter)
+#   CE 协议分发(CEServer/porthelp) + API 实现(api) + 内核读写驱动(AndroidKernelDriver)
 # ----------------------------------------------------------------------------
 add_library(server_core STATIC
     ${CMAKE_SOURCE_DIR}/ceserver/CEServer.cpp
     ${CMAKE_SOURCE_DIR}/ceserver/porthelp.cpp
     ${CMAKE_SOURCE_DIR}/ceserver/api.cpp
-    ${CMAKE_SOURCE_DIR}/android/MemoryReaderWriter.cpp
+    ${CMAKE_SOURCE_DIR}/android/NiDriver.cpp
+    ${CMAKE_SOURCE_DIR}/android/AndroidKernelDriver.cpp
 )
 
 target_link_libraries(server_core PUBLIC common_interface)

@@ -37,7 +37,7 @@
 //#include "AndroidMemoryIO.hpp"//pread mem
 #include "AndroidMemorySys.hpp"//sys_process_vm_readv
 #include "AndroidMemKernel.hpp"//ko
-#include "MemoryReaderWriter.h"//硬件断点驱动（必需，driver_变量定义在此）
+#include "AndroidKernelDriver.h"//硬件断点驱动（KernelDriver 单例）
 #include "PerfHwBreakpoint.hpp"//用户态 perf_event_open 硬件断点引擎（非内核模式回退）
 #include "KernelHwBreakpoint.hpp"//内核驱动断点的进程级封装（自动跟随新线程）
 
@@ -148,11 +148,11 @@ BOOL CApi::InitReadWriteDriver(const char *procNodeAuthKey,
   // 若内核驱动连接仍然有效，说明已处于内核模式，直接复用，不重建 AndroidMemKernel。
   // 注意：不能用 g_memIO->type 判断（该字段可能被前端改写），驱动连接状态（m_nFd）
   // 才是唯一可靠依据。否则下方 g_memIO = std::move(memKernel) 会析构旧内核对象，
-  // 其析构调用 DisconnectDriver() 关掉全局共享 driver_ 的 fd
+  // 其析构调用 Disconnect() 关掉全局共享内核驱动 fd
   // （典型触发：切到内核模式后关闭 GUI，重开再次走 init_driver）。
 {
   std::shared_lock<std::shared_mutex> rlock(g_globalMutex);
-  if (g_memIO->type == MemType_Kernel && driver_->IsDriverConnected()) {
+  if (g_memIO->type == MemType_Kernel && KernelDriver().IsConnected()) {
     uint64_t cardTime = 0;
     g_memIO->GetCardTime(cardTime);
     out_result = std::to_string(cardTime);
@@ -180,143 +180,83 @@ BOOL CApi::InitReadWriteDriver(const char *procNodeAuthKey,
     return 2;
   }
 
-  LOGDF("InitReadWriteDriver: driver not loaded, trying to load module...");
+  LOGDF("InitReadWriteDriver: NI driver not loaded, trying to load NI.ko...");
 
-  // 连接失败，继续执行现有的模块加载流程
-  // 分割字符串
-  std::string procNodeAuthKeyStr = std::string(procNodeAuthKey);
-  ssize_t pos = procNodeAuthKeyStr.find_last_of("-");
-  if (pos == -1) {
-    out_result = "procNodeAuthKey格式错误";
-    return FALSE;
-  }
-  std::string card = procNodeAuthKeyStr.substr(0, pos);
-  std::string kernelType = procNodeAuthKeyStr.substr(pos + 1);
-
-  //先解析域名获取ip 列表
-  std::vector<std::string> ips;
-  if (!resolve("yz.blyfw.cn", ips)||ips.empty()) {
-    out_result = "域名解析失败，无法进行登录";
-    return FALSE;
+  std::string procNodeAuthKeyStr = procNodeAuthKey ? std::string(procNodeAuthKey) : std::string();
+  std::string card = procNodeAuthKeyStr;
+  size_t pos = procNodeAuthKeyStr.find_last_of("-");
+  if (pos != std::string::npos) {
+    card = procNodeAuthKeyStr.substr(0, pos);
   }
 
-  std::string MacPath = "/data/adb/.aceMacc";
-    // mac
-	std::string mac = readfs(MacPath, []() {
-		return GenerateRandomDigitString(16); });
-			//先清空文件
-	file_clear(MacPath);
-	//写入mac到文件
-	writefs_append(MacPath, mac);
-	writefs_append(MacPath, "\n");
-	//写入ip列表到文件
-	for (const auto& ip : ips) {
-		writefs_append(MacPath, ip+"\n");
-	}
+  std::string localPath = GetLocalPath();
+  std::vector<std::string> moduleCandidates = {
+      localPath + "/NI.ko",
+      "/data/local/tmp/NI.ko",
+  };
 
-
-
-  // 目标模块路径尝试顺序：5系先cfi，再mem 6系直接mem
-  std::string modulePath = GetLocalPath();
-  if (kernelType == "5") {
-    std::string cfiPath = modulePath + "/CFI.ko";
-    if (access(cfiPath.c_str(), F_OK) != 0) {
-      // cfi不存在
-      out_result = "CFI.ko 不存在";
-      LOGEF("InitReadWriteDriver: CFI module not found: %s", cfiPath.c_str());
-      return FALSE;
+  std::string niPath;
+  for (const auto& candidate : moduleCandidates) {
+    if (!candidate.empty() && access(candidate.c_str(), F_OK) == 0) {
+      niPath = candidate;
+      break;
     }
-    // 加载cfi
-    int fd = open(cfiPath.c_str(), O_RDONLY);
+  }
+
+  if (niPath.empty()) {
+    out_result = "NI.ko 不存在";
+    LOGEF("InitReadWriteDriver: NI.ko not found");
+    return FALSE;
+  }
+
+  auto loadNiModule = [&](const std::string& params, int& savedErrno) -> int {
+    int fd = open(niPath.c_str(), O_RDONLY);
     if (fd < 0) {
-      out_result = std::string("打开模块失败: ") + strerror(errno);
-      LOGEF("InitReadWriteDriver: CFI open failed: %s", strerror(errno));
-      return FALSE;
+      savedErrno = errno;
+      return -1;
     }
-
-    int ret = -1;
-
-    ret = syscall(SYS_finit_module, fd, "", 0);
-
-    int saved_errno = errno;
+    errno = 0;
+    int ret = syscall(SYS_finit_module, fd, params.c_str(), 0);
+    savedErrno = errno;
     close(fd);
-    if (ret < 0 && saved_errno != EEXIST) {
-      out_result = std::string("加载模块失败: ") + strerror(saved_errno);
-      LOGEF("InitReadWriteDriver: CFI load failed: %s", strerror(saved_errno));
-      return FALSE;
-    }
+    return ret;
+  };
+
+  std::vector<std::string> paramAttempts;
+  if (!card.empty()) {
+    paramAttempts.push_back("card=" + card);
   }
+  paramAttempts.emplace_back();
 
-  std::string memPath = modulePath + "/Mem.ko";
-
-  if (memPath.empty() || access(memPath.c_str(), F_OK) != 0) {
-    memPath = "/data/local/tmp/Mem.ko";
-  }
-
-  if (access(memPath.c_str(), F_OK) != 0) {
-    out_result = "Mem.ko 不存在: " + memPath;
-    LOGEF("InitReadWriteDriver: Mem module not found: %s", memPath.c_str());
-    return FALSE;
-  }
-
-
-  std::string params = "card=" + card;
-
-  // 优先使用 finit_module(syscall)
-  int fd = open(memPath.c_str(), O_RDONLY);
-  if (fd < 0) {
-    out_result = std::string("打开模块失败: ") + strerror(errno);
-    LOGEF("InitReadWriteDriver: Mem open failed: %s", strerror(errno));
-    return FALSE;
-  }
-
+  int saved_errno = 0;
   int ret = -1;
-
-  ret = syscall(SYS_finit_module, fd, params.c_str(), 0);
-
-  int saved_errno = errno;
-  close(fd);
-
-  if (ret != 0) {
-
-    KernelLogMatches logs;
-    std::string info;
-    ExtractMemAndNetVerifyLogsFromKernelLog(logs, info);
-    LOGE("=== Mem 日志 ===");
-    for (auto inf : logs.mem_logs) {
-      LOGEF("%s", inf.c_str());
+  std::string usedParams;
+  for (const auto& params : paramAttempts) {
+    ret = loadNiModule(params, saved_errno);
+    usedParams = params;
+    if (ret == 0 || saved_errno == EEXIST) {
+      break;
     }
+  }
 
-    LOGE("=== NET_VERIFY 日志 ===");
-    for (auto inf : logs.net_verify_logs) {
-      LOGEF("%s", inf.c_str());
-    }
-
-    std::string err_msg = "加载模块失败：";
-    if (ret == -6) {
-      err_msg += "域名解析失败";
-    } else if (ret == -7) {
-      err_msg += "版本检测失败";
-    } else if (ret == -8) {
-      err_msg += "登录失败";
-    } else {
-      err_msg += strerror(saved_errno);
-    }
+  if (ret != 0 && saved_errno != EEXIST) {
+    std::string err_msg = "加载 NI.ko 失败: ";
+    err_msg += strerror(saved_errno);
     err_msg += " code " + std::to_string(saved_errno);
     out_result = err_msg;
-    LOGEF("InitReadWriteDriver: Mem load failed(%d): %s", saved_errno,
-          err_msg.c_str());
+    LOGEF("InitReadWriteDriver: NI.ko load failed(%d): %s", saved_errno, err_msg.c_str());
     return FALSE;
   }
 
-  out_result = "加载模块成功";
-  LOGDF("InitReadWriteDriver: Mem module loaded, card %s\n", card.c_str());
+  out_result = "加载 NI.ko 成功";
+  LOGDF("InitReadWriteDriver: NI.ko loaded from %s params=%s",
+        niPath.c_str(), usedParams.empty() ? "<empty>" : usedParams.c_str());
 
   // 模块加载成功后，再尝试连接
   memKernel = std::make_unique<AndroidMemKernel>();
   if (!memKernel->connect()) {
-    out_result = "驱动连接失败";
-    LOGEF("InitReadWriteDriver: driver connect failed after load");
+    out_result = "NI 驱动连接失败";
+    LOGEF("InitReadWriteDriver: NI driver connect failed after load");
     return FALSE;
   }
 
@@ -353,8 +293,7 @@ BOOL _GetProcessListInfo(IMemoryOp* pDriver, BOOL bGetPhyMemorySize, std::vector
 		MyProcessInfo pInfo = { 0 };
 		pInfo.pid = pid;
 		if (bGetPhyMemorySize) {
-			//todo
-			//pInfo.total_rss =pDriver->GetProcessPhyMemSize(pid);
+			// RSS 统计当前精简协议暂未返回。
 		}
 		pInfo.cmdline = name;
 		vOutput.push_back(pInfo);
@@ -782,15 +721,16 @@ int CApi::ReadBratchMemory(HANDLE hProcess, CeReadBratchMemory&input,
 
 	//input 是 一个起始地址 和 大小
 	//output 是 一个数组 每个元素对应有效的页面
+	constexpr size_t kPageSize = 4096;
 	ssize_t Size = input.size;
 	uint64_t addr = input.addr;
 	uint64_t end = addr + Size;
 	//todo 一次读多个页
-	for(;addr < end; addr += PAGE_SIZE){
+	for(;addr < end; addr += kPageSize){
 		CeReadBratchMemoryOutput o;
 		o.addr = addr;
-		o.data.resize(PAGE_SIZE);
-		int bread = g_memIO->Read(addr, o.data.data(), PAGE_SIZE);
+		o.data.resize(kPageSize);
+		int bread = g_memIO->Read(addr, o.data.data(), kPageSize);
 		if(bread > 0){
 			output.push_back(o);
 		}
@@ -908,7 +848,7 @@ int CApi::SetBreakpoint(HANDLE hProcess, uint64_t address, int bpType, int bpSiz
 	bool useKernel;
 	{
 		std::shared_lock<std::shared_mutex> rlock(g_globalMutex);
-		useKernel = driver_->IsDriverConnected() && g_memIO->type == MemType_Kernel;
+		useKernel = KernelDriver().IsConnected() && g_memIO->type == MemType_Kernel;
 	}
 
 	if (CPortHelper::GetHandleType(hProcess) != htProcesHandle) {
@@ -960,7 +900,7 @@ int CApi::SetBreakpoint(HANDLE hProcess, uint64_t address, int bpType, int bpSiz
 		if (PerfHwBreakpoint::Get().Owns(hwhandle)) {
 			PerfHwBreakpoint::Get().DelProcessHwBp(hwhandle);
 		} else {
-			driver_->DelProcessHwBp(hwhandle);
+			KernelDriver().RemoveHardwareBreakpoint(hwhandle);
 		}
 	}
 	return HwBpHandle.size();
@@ -1001,7 +941,7 @@ int CApi::RemoveBreakpoint(HANDLE hProcess,uint64_t hwaddr){
 			} else if (KernelHwBreakpoint::Get().Owns(hwhandle)) {
 				KernelHwBreakpoint::Get().DelProcessHwBp(hwhandle);
 			} else {
-				driver_->DelProcessHwBp(hwhandle);
+				KernelDriver().RemoveHardwareBreakpoint(hwhandle);
 			}
 		}
 		return 1;
@@ -1040,7 +980,7 @@ int CApi::SuspendBreakpoint(HANDLE hProcess,uint64_t hwaddr){
 			} else if (KernelHwBreakpoint::Get().Owns(hwhandle)) {
 				KernelHwBreakpoint::Get().SuspendProcessHwBp(hwhandle);
 			} else {
-				driver_->SuspendProcessHwBp(hwhandle);
+				KernelDriver().DisableHardwareBreakpoint(hwhandle);
 			}
 		}
 		return 1;
@@ -1080,7 +1020,7 @@ int CApi::ResumeBreakpoint(HANDLE hProcess,uint64_t hwaddr){
 			} else if (KernelHwBreakpoint::Get().Owns(hwhandle)) {
 				KernelHwBreakpoint::Get().ResumeProcessHwBp(hwhandle);
 			} else {
-				driver_->ResumeProcessHwBp(hwhandle);
+				KernelDriver().EnableHardwareBreakpoint(hwhandle);
 			}
 		}
 		return 1;
@@ -1130,7 +1070,7 @@ int CApi::ReadHwBpInfo(HANDLE hProcess,uint64_t hwaddr,uint64_t& nHitTotalCount,
 			? PerfHwBreakpoint::Get().ReadHwBpInfo(hwhandle, hitCount, vHandleHwBpInfo)
 			: KernelHwBreakpoint::Get().Owns(hwhandle)
 				? KernelHwBreakpoint::Get().ReadHwBpInfo(hwhandle, hitCount, vHandleHwBpInfo)
-				: driver_->ReadHwBpInfo(hwhandle, hitCount, vHandleHwBpInfo);
+				: KernelDriver().ReadHardwareBreakpointInfo(hwhandle, hitCount, vHandleHwBpInfo);
 		if (!ok) {
 			continue;
 		}

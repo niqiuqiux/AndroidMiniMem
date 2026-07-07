@@ -9,46 +9,46 @@
 #include "../common/Logger.hpp"
 
 
-#include "MemoryReaderWriter.h"
+#include "AndroidKernelDriver.h"
 
 
 class AndroidMemKernel : public IMemoryOp {
 private:
     pid_t pid_ = 0;
     std::string processName_;
-    std::shared_ptr<CMemoryReaderWriter> driver = driver_;
+    AndroidKernelDriver& driver_;
     uint64_t driverProcessHandle_ = 0;
 
 public:
-    AndroidMemKernel() {
+    AndroidMemKernel() : driver_(KernelDriver()) {
         type = 3;
     }
 
     ~AndroidMemKernel() {
-        driver->DisconnectDriver();
+        driver_.Disconnect();
     }
 
     bool connect() {
         LOGDF("Connecting via anon_fd...");
-        int rc = driver->ConnectDriver("");
+        int rc = driver_.Connect();
         if (rc < 0) {
-            LOGEF("ConnectDriver failed rc=%d %s", rc, strerror(errno));
+            LOGEF("KernelDriver connect failed rc=%d %s", rc, strerror(errno));
             return false;
         }
-        LOGDF("ConnectDriver success");
-        return driver->IsDriverConnected();
+        LOGDF("KernelDriver connect success");
+        return driver_.IsConnected();
     }
 
     bool isConnected() {
-        bool ok = driver->IsDriverConnected();
+        bool ok = driver_.IsConnected();
         if (!ok) {
-            LOGEF("IsDriverConnected failed");
+            LOGEF("KernelDriver is not connected");
         }
         return ok;
     }
 
     bool GetCardTime(uint64_t& outCardTime) override {
-        return driver->GetCardTime(outCardTime);
+        return driver_.GetExpireTime(outCardTime);
     }
 
 
@@ -66,14 +66,14 @@ public:
             }
         }
 
-        driverProcessHandle_ = driver->OpenProcess(static_cast<uint64_t>(pid_));
+        driverProcessHandle_ = driver_.OpenProcess(pid_);
         if (driverProcessHandle_ == 0) {
             LOGEF("OpenProcess failed, pid: %d", pid_);
             return false;
         }
         // 尝试读取命令行作为进程名
         char name[256] = {0};
-        if (driver->GetProcessComm(static_cast<uint64_t>(pid_), name, sizeof(name))) {
+        if (driver_.GetProcessComm(pid_, name, sizeof(name))) {
             processName_ = name;
         }
         return true;
@@ -83,7 +83,7 @@ public:
         pid_ = 0;
         bool ok = true;
         if (driverProcessHandle_) {
-            ok = driver->CloseHandle(driverProcessHandle_);
+            ok = driver_.CloseProcess(driverProcessHandle_);
         }
         driverProcessHandle_ = 0;
         return ok;
@@ -110,25 +110,23 @@ public:
                                remaining_len : bytes_to_page_boundary;
 
             // 执行分页读取
-            size_t bytes_read = 0;
-            int ok = const_cast<AndroidMemKernel*>(this)->driver->ReadProcessMemory(
+            ssize_t bytes_read = const_cast<AndroidMemKernel*>(this)->driver_.ReadMemory(
                 const_cast<AndroidMemKernel*>(this)->driverProcessHandle_,
                 static_cast<uint64_t>(current_addr),
                 current_buffer,
-                chunk_size,
-                &bytes_read,
-                false
+                chunk_size
             );
 
             // 连续前缀语义：成功则前进，遇不可读/短读即停止
-            if (ok > 0 && bytes_read > 0) {
-                total_bytes_read += bytes_read;
-                current_addr += bytes_read;
-                current_buffer += bytes_read;
-                remaining_len -= bytes_read;
+            if (bytes_read > 0) {
+                size_t got = static_cast<size_t>(bytes_read);
+                total_bytes_read += got;
+                current_addr += got;
+                current_buffer += got;
+                remaining_len -= got;
 
                 // 短读说明到达不可读边界，连续区到此为止
-                if (bytes_read < chunk_size) {
+                if (got < chunk_size) {
                     break;
                 }
             } else {
@@ -150,26 +148,22 @@ public:
         size_t nSize,
         size_t* lpNumberOfBytesRead = NULL) override {
 
-        size_t bytesRead = 0;
-        bool ok = driver->ReadProcessMemory(driverProcessHandle_, lpBaseAddress, lpBuffer, nSize,
-                 &bytesRead, false);
-        if (lpNumberOfBytesRead) *lpNumberOfBytesRead = bytesRead;
-        return ok ? static_cast<int>(bytesRead) : 0;
+        ssize_t bytesRead = driver_.ReadMemory(driverProcessHandle_, lpBaseAddress, lpBuffer, nSize);
+        size_t got = bytesRead > 0 ? static_cast<size_t>(bytesRead) : 0;
+        if (lpNumberOfBytesRead) *lpNumberOfBytesRead = got;
+        return static_cast<int>(got);
     }
 
     size_t Write(uintptr_t address, const void* buffer, size_t len) const override {
         if (address == 0 || buffer == nullptr || len == 0) return 0;
-        size_t bytesWritten = 0;
         if (!const_cast<AndroidMemKernel*>(this)->driverProcessHandle_) return 0;
-        bool ok = const_cast<AndroidMemKernel*>(this)->driver->WriteProcessMemory(
+        ssize_t bytesWritten = const_cast<AndroidMemKernel*>(this)->driver_.WriteMemory(
             const_cast<AndroidMemKernel*>(this)->driverProcessHandle_,
             static_cast<uint64_t>(address),
-            const_cast<void*>(buffer),
-            len,
-            &bytesWritten,
-            false
+            buffer,
+            len
         );
-        return ok ? bytesWritten : 0;
+        return bytesWritten > 0 ? static_cast<size_t>(bytesWritten) : 0;
     }
 
     pid_t GetProcessId() const override {
@@ -195,7 +189,7 @@ public:
     std::vector<std::pair<int, std::string>> GetProcessPidList() override {
         std::vector<std::pair<int, std::string>> result;
         std::vector<int> pids;
-        if (!driver->GetPidList(pids)) {
+        if (!driver_.GetPidList(pids)) {
             return result;
         }
         LOGDF("GetProcessPidList pids.size() %zu", pids.size());
@@ -203,10 +197,10 @@ public:
         char name[256];
         for (int pid : pids) {
             memset(name, 0, sizeof(name));
-            driver->GetProcessCmdline(static_cast<uint64_t>(pid), name, sizeof(name));
+            driver_.GetProcessCmdline(pid, name, sizeof(name));
             if (std::string(name).empty()) {
                 memset(name, 0, sizeof(name));
-                driver->GetProcessComm(static_cast<uint64_t>(pid), name, sizeof(name));
+                driver_.GetProcessComm(pid, name, sizeof(name));
             }
             std::string name_str = name;
             // 读取链接
@@ -242,8 +236,8 @@ public:
         if (driverProcessHandle_ == 0) return maps;
 
         std::vector<DRIVER_REGION_INFO> regions;
-        if (!const_cast<AndroidMemKernel*>(this)->driver->VirtualQueryExFull(
-                const_cast<AndroidMemKernel*>(this)->driverProcessHandle_, FALSE, regions)) {
+        if (!const_cast<AndroidMemKernel*>(this)->driver_.QueryMaps(
+                const_cast<AndroidMemKernel*>(this)->driverProcessHandle_, false, regions)) {
             return maps;
         }
 

@@ -2,7 +2,7 @@
 // ============================================================================
 // KernelHwBreakpoint.hpp — 内核驱动硬件断点的进程级封装 + 自动跟随新线程
 // ----------------------------------------------------------------------------
-// 内核驱动断点本身是 per-tid 的（driver_->AddProcessHwBp(tid,...)），原先在
+// 内核驱动断点本身是 per-tid 的（KernelDriver().AddHardwareBreakpoint(tid,...)），原先在
 // CApi::SetBreakpoint 里一次性快照线程下断，不跟随设断点后新建的线程。本引擎
 // 把它封装成"进程级逻辑断点"，与 PerfHwBreakpoint 对称：
 //   - 一个 handle 代表"某进程某地址的断点"，内部为该进程每线程下一个内核断点；
@@ -27,7 +27,7 @@
 #include <vector>
 #include <algorithm>
 
-#include "MemoryReaderWriter.h"   // driver_ + HW_HIT_ITEM + 断点枚举
+#include "AndroidKernelDriver.h"   // KernelDriver + HW_HIT_ITEM
 #include "Logger.hpp"
 
 // 内核逻辑断点 handle 的高位标记（bit61）。与 perf 的 bit62 区分；归属判别仍以
@@ -46,7 +46,7 @@ public:
         if (pid <= 0 || addr == 0) {
             return 0;
         }
-        if (!driver_->IsDriverConnected()) {
+        if (!KernelDriver().IsConnected()) {
             LOGEF("[kbp] AddProcessHwBp: 驱动未连接");
             return 0;
         }
@@ -65,7 +65,7 @@ public:
         e.enabled = true;
 
         for (int tid : tids) {
-            uint64_t dh = driver_->AddProcessHwBp(tid, addr, len, type);
+            uint64_t dh = KernelDriver().AddHardwareBreakpoint(tid, addr, len, type);
             if (dh != 0) {
                 e.subs[tid] = dh;
             }
@@ -93,7 +93,7 @@ public:
             return false;
         }
         for (auto& kv : it->second.subs) {
-            driver_->DelProcessHwBp(kv.second);
+            KernelDriver().RemoveHardwareBreakpoint(kv.second);
         }
         mEntries.erase(it);
         Wake();
@@ -108,7 +108,7 @@ public:
             return false;
         }
         for (auto& kv : it->second.subs) {
-            driver_->SuspendProcessHwBp(kv.second);
+            KernelDriver().DisableHardwareBreakpoint(kv.second);
         }
         it->second.enabled = false;
         return true;
@@ -121,7 +121,7 @@ public:
             return false;
         }
         for (auto& kv : it->second.subs) {
-            driver_->ResumeProcessHwBp(kv.second);
+            KernelDriver().EnableHardwareBreakpoint(kv.second);
         }
         it->second.enabled = true;
         return true;
@@ -138,7 +138,7 @@ public:
         for (auto& kv : it->second.subs) {
             uint64_t cnt = 0;
             std::vector<HW_HIT_ITEM> sub;
-            if (driver_->ReadHwBpInfo(kv.second, cnt, sub)) {
+            if (KernelDriver().ReadHardwareBreakpointInfo(kv.second, cnt, sub)) {
                 total += cnt;
                 // 与 perf 后端对齐：命中记录只保留通用寄存器 x0..x30 + sp + pc，
                 // 清零驱动额外填充的 pstate/orig_x0/syscallno（HW_HIT_ITEM 已无 fpsimd_info 字段）。
@@ -190,7 +190,7 @@ private:
         std::lock_guard<std::mutex> lk(mMutex);
         for (auto& e : mEntries) {
             for (auto& kv : e.second.subs) {
-                driver_->DelProcessHwBp(kv.second);
+                KernelDriver().RemoveHardwareBreakpoint(kv.second);
             }
         }
         mEntries.clear();
@@ -238,11 +238,11 @@ private:
             // 补下断新线程
             for (int tid : tids) {
                 if (e.subs.find(tid) == e.subs.end()) {
-                    uint64_t dh = driver_->AddProcessHwBp(tid, e.bp_addr, e.bp_len, e.bp_type);
+                    uint64_t dh = KernelDriver().AddHardwareBreakpoint(tid, e.bp_addr, e.bp_len, e.bp_type);
                     if (dh != 0) {
                         // 与逻辑断点当前启停状态保持一致
                         if (!e.enabled) {
-                            driver_->SuspendProcessHwBp(dh);
+                            KernelDriver().DisableHardwareBreakpoint(dh);
                         }
                         e.subs[tid] = dh;
                         LOGDF("[kbp] 跟随新线程 tid=%d handle=0x%llx", tid,
@@ -253,7 +253,7 @@ private:
             // 回收已退出线程
             for (auto sit = e.subs.begin(); sit != e.subs.end(); ) {
                 if (std::find(tids.begin(), tids.end(), sit->first) == tids.end()) {
-                    driver_->DelProcessHwBp(sit->second);
+                    KernelDriver().RemoveHardwareBreakpoint(sit->second);
                     sit = e.subs.erase(sit);
                 } else {
                     ++sit;
