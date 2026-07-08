@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
-from ..helpers import clamp_page, parse_int
+from ..helpers import clamp_page, format_module_perms, parse_int
 from ..ipc_client import IpcClient
 
 
@@ -48,7 +48,10 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
 
     @mcp.tool()
     def list_modules(filter: str = "", offset: int = 0, count: int = 200) -> str:
-        """列出当前进程加载的模块。
+        """列出当前进程加载的模块（含 rwxp 权限）。
+
+        每条记录对应一个内存段，权限格式为 rwxp（r=读 w=写 x=执行，
+        第四位 p=私有 / s=共享）。同一模块可能因多段权限不同而出现多次。
 
         Args:
             filter: 模块名称过滤（大小写不敏感子串匹配），留空返回全部
@@ -67,7 +70,8 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             return f"未获取到模块（总数: {total}）"
         lines = [f"模块列表（总数: {total}, offset: {off}, 本页: {len(mods)}）:", ""]
         for m in mods:
-            lines.append(f"  {m['base']}  size={m['size']:#010x}  {m['name']}")
+            perms = format_module_perms(m.get("flag", 0))
+            lines.append(f"  {m['base']}  {perms}  size={m['size']:#010x}  {m['name']}")
         if off + len(mods) < total:
             lines.append(
                 f"\n... 还有 {total - off - len(mods)} 个模块未显示，"

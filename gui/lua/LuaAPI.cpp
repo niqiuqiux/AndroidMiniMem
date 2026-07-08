@@ -272,6 +272,19 @@ int LuaAPI::GetModuleList(lua_State* L) {
             lua_setfield(L, -2, "base");
             lua_pushinteger(L, modules[i].size);
             lua_setfield(L, -2, "size");
+            // 权限：flag 原始位掩码 + rwxp 字符串
+            // 位定义与设备端一致：1=读 2=写 4=执行 8=私有(p) 16=共享(s)
+            const int flag = modules[i].flag;
+            lua_pushinteger(L, flag);
+            lua_setfield(L, -2, "flag");
+            char perms[5];
+            perms[0] = (flag & 1) ? 'r' : '-';
+            perms[1] = (flag & 2) ? 'w' : '-';
+            perms[2] = (flag & 4) ? 'x' : '-';
+            perms[3] = (flag & 8) ? 'p' : ((flag & 16) ? 's' : '-');
+            perms[4] = '\0';
+            lua_pushstring(L, perms);
+            lua_setfield(L, -2, "perms");
             lua_settable(L, -3);
         }
         return 1;
