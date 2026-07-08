@@ -80,6 +80,25 @@ def clamp_page(offset: int, count: int, max_count: int = 1000) -> tuple[int, int
     return parse_int(offset), parse_positive_int(count, "count", max_count)
 
 
+def format_module_perms(flag: int) -> str:
+    """将模块段的 flag 位掩码格式化为 rwxp 权限字符串。
+
+    位定义与设备端一致（engine/common/LinuxProc.hpp、AndroidMemKernel.hpp）：
+    1=读 2=写 4=执行 8=私有(p) 16=共享(s)。第四位私有优先于共享。
+    """
+    flag = int(flag)
+    r = "r" if flag & 1 else "-"
+    w = "w" if flag & 2 else "-"
+    x = "x" if flag & 4 else "-"
+    if flag & 8:
+        sp = "p"
+    elif flag & 16:
+        sp = "s"
+    else:
+        sp = "-"
+    return r + w + x + sp
+
+
 def encode_value_hex(value: str, data_type: str) -> str:
     """Encode a typed scalar value as little-endian hex.
 
