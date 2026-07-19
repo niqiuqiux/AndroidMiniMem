@@ -1,6 +1,6 @@
 """硬件断点。
 
-断点类型编号与 AMem 内部（gui/BreakpointWindow.h / LuaAPI.cpp / IpcServer）保持一致:
+断点类型编号与 MiniMem 内部（LuaAPI.cpp / IpcServer）保持一致：
     1 = 读 (HW_BREAKPOINT_R)
     2 = 写 (HW_BREAKPOINT_W)
     3 = 读写 (HW_BREAKPOINT_RW = R | W)
@@ -124,7 +124,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
 
     @mcp.tool()
     def set_breakpoint(address: str, bp_type: int = 2, bp_size: int = 4) -> str:
-        """设置硬件断点（类型编号与 AMem 内部保持一致）。
+        """设置硬件断点（类型编号与 MiniMem 内部保持一致）。
 
         Args:
             address: 断点地址

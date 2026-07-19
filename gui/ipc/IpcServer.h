@@ -3,11 +3,18 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <functional>
+#include <mutex>
+#include <optional>
 #include <unordered_map>
+#include <vector>
 #include <nlohmann/json.hpp>
+#include "../mem/MemTypes.h"
 
 using json = nlohmann::json;
+namespace Mem { class IMemService; }
 
 /**
  * 轻量 HTTP Server，监听 localhost，接收 JSON-RPC 风格请求，
@@ -21,7 +28,7 @@ public:
     static IpcServer& GetInstance();
 
     // 启动/停止
-    bool Start(uint16_t port = 28100);
+    bool Start(Mem::IMemService& service, uint16_t port = 28100);
     void Stop();
     bool IsRunning() const { return running_.load(); }
     uint16_t GetPort() const { return port_; }
@@ -36,6 +43,7 @@ private:
     IpcServer& operator=(const IpcServer&) = delete;
 
     void ServerThread();
+    void ClientWorker();
     void HandleClient(uintptr_t clientSocket);
     void CloseListenSocket();
     void WakeAcceptLoop();
@@ -49,5 +57,13 @@ private:
     uint16_t port_ = 28100;
     std::atomic<uintptr_t> listenSocket_{~(uintptr_t)0}; // INVALID_SOCKET
     std::thread serverThread_;
+    std::vector<std::thread> clientThreads_;
+    std::mutex clientQueueMutex_;
+    std::condition_variable clientQueueCv_;
+    std::deque<uintptr_t> clientQueue_;
+    bool stopClientWorkers_ = false;
     std::unordered_map<std::string, Handler> handlers_;
+    Mem::IMemService* service_ = nullptr;
+    std::mutex symbolCacheMutex_;
+    std::optional<Mem::SymbolTable> legacySymbolTable_;
 };

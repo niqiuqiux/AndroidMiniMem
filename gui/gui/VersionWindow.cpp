@@ -1,11 +1,12 @@
 #include "VersionWindow.h"
 #include "ColorScheme.h"
 #include "../imgui/imgui.h"
-#include "../socket/client_singleton.h"
+#include "../mem/IMemService.h"
 #include "Gui.h"
 #include <version.h>  // CMake 生成的版本信息
 
-VersionWindow::VersionWindow()
+VersionWindow::VersionWindow(Mem::IMemService& service)
+	: service_(service)
 {
 	name = "版本信息";
 }
@@ -34,15 +35,16 @@ void VersionWindow::onDraw()
 	
 	if (ImGui::Button("获取服务端版本"))
 	{
-		ServerVersionInfo info{};
-		if (FetchServerVersion(info)) {
+		auto result = service_.serverVersion(service_.captureContext(false));
+		if (result.ok()) {
 			hasData = true;
-			version = info.version;
-			versionString = info.versionString;
+			version = result.value().version;
+			versionString = result.value().versionString;
 			Gui::log("服务端版本: %d (%s)", version, versionString.c_str());
 		} else {
 			hasData = false;
-			Gui::log("获取服务端版本失败，请检查连接状态");
+			Gui::log("获取服务端版本失败: %s",
+			         result.error().message.c_str());
 		}
 	}
 

@@ -10,6 +10,7 @@ inline thread_local DWORD g_threadTimeoutMs = 0;
 inline thread_local std::chrono::steady_clock::time_point g_threadDeadline;
 
 inline constexpr DWORD kMaxTimeoutMs = 300000;
+inline constexpr DWORD kDefaultIoTimeoutMs = 5000;
 
 // 单次 socket I/O 的最小超时下限。
 //
@@ -79,6 +80,34 @@ public:
             std::chrono::milliseconds(g_threadTimeoutMs);
     }
 
+    explicit ScopedTimeout(
+        std::chrono::steady_clock::time_point deadline)
+        : previous_(g_threadTimeoutMs),
+          previousDeadline_(g_threadDeadline) {
+        const auto now = std::chrono::steady_clock::now();
+        if (deadline ==
+            (std::chrono::steady_clock::time_point::max)()) {
+            g_threadTimeoutMs = 0;
+            g_threadDeadline = {};
+            return;
+        }
+        if (deadline <= now) {
+            g_threadTimeoutMs = 1;
+            g_threadDeadline = deadline;
+            return;
+        }
+
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - now).count();
+        if (remaining <= 0)
+            remaining = 1;
+        g_threadTimeoutMs = ClampTimeoutMs(
+            static_cast<unsigned long long>(remaining));
+        if (g_threadTimeoutMs == 0)
+            g_threadTimeoutMs = 1;
+        g_threadDeadline = deadline;
+    }
+
     ~ScopedTimeout() {
         g_threadTimeoutMs = previous_;
         g_threadDeadline = previousDeadline_;
@@ -96,13 +125,15 @@ class SocketOptionTimeoutGuard {
 public:
     SocketOptionTimeoutGuard(SOCKET sock, int option)
         : sock_(sock), option_(option) {
-        if (!HasThreadTimeout() || sock_ == INVALID_SOCKET) {
+        if (sock_ == INVALID_SOCKET) {
             return;
         }
 
         // 用剩余预算，但不低于单次 I/O 下限：命令一旦发出就要给足时间读回
         // 响应，避免在途响应被预算耗尽掐断（见 kMinIoTimeoutMs 注释）。
-        const DWORD remainingMs = GetRemainingTimeoutMs();
+        const DWORD remainingMs = HasThreadTimeout()
+                                      ? GetRemainingTimeoutMs()
+                                      : kDefaultIoTimeoutMs;
         const DWORD timeoutMs =
             remainingMs < kMinIoTimeoutMs ? kMinIoTimeoutMs : remainingMs;
         SocketPlatform::SocketOptionLength optLen = sizeof(previous_);

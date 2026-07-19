@@ -7,10 +7,7 @@ import struct
 
 from .constants import (
     DATA_TYPE_FMT,
-    DATA_TYPE_MAP,
     DATA_TYPE_SIZE,
-    MEMORY_TYPE_MAP,
-    SCAN_TYPE_MAP,
 )
 
 
@@ -44,22 +41,6 @@ def normalize_data_type(data_type: str) -> str:
     key = str(data_type).strip().lower()
     if key not in DATA_TYPE_FMT:
         raise ValueError(f"unsupported data_type '{data_type}'")
-    return key
-
-
-def normalize_scan_type(scan_type: str, allowed: set[str] | None = None) -> str:
-    key = str(scan_type).strip().lower()
-    if key not in SCAN_TYPE_MAP:
-        raise ValueError(f"unsupported scan_type '{scan_type}'")
-    if allowed is not None and key not in allowed:
-        raise ValueError(f"scan_type '{scan_type}' is not valid for this tool")
-    return key
-
-
-def normalize_memory_type(memory_type: str) -> str:
-    key = str(memory_type).strip().lower()
-    if key not in MEMORY_TYPE_MAP:
-        raise ValueError(f"unsupported memory_type '{memory_type}'")
     return key
 
 
@@ -103,9 +84,7 @@ def encode_value_hex(value: str, data_type: str) -> str:
     """Encode a typed scalar value as little-endian hex.
 
     Integer types accept signed input (e.g. "-1"): a negative value is wrapped
-    to its two's-complement representation for the type width, matching the C++
-    encodeScanValue/parseIntegerBits behaviour so the same value scans
-    identically through the GUI, the in-app AI agent, and MCP.
+    to its two's-complement representation for the selected type width.
     """
     data_type = normalize_data_type(data_type)
     fmt = DATA_TYPE_FMT[data_type]
@@ -142,13 +121,6 @@ def decode_value(hex_data: str, data_type: str):
     if len(data) < size:
         return None
     return struct.unpack(fmt, data[:size])[0]
-
-
-def make_scan_flags(scan_type: str, data_type: str) -> int:
-    """Combine a scan type flag and a data type flag."""
-    scan_type = normalize_scan_type(scan_type)
-    data_type = normalize_data_type(data_type)
-    return SCAN_TYPE_MAP[scan_type] | DATA_TYPE_MAP[data_type]
 
 
 def hex_dump(hex_str: str, base_addr: int, width: int = 16) -> str:

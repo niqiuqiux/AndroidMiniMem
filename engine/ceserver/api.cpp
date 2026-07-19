@@ -1,5 +1,6 @@
 #include "api.h"
 #include <cerrno>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -250,7 +251,7 @@ BOOL CApi::InitReadWriteDriver(const char *procNodeAuthKey,
 
   out_result = "加载 NI.ko 成功";
   LOGDF("InitReadWriteDriver: NI.ko loaded from %s params=%s",
-        niPath.c_str(), usedParams.empty() ? "<empty>" : usedParams.c_str());
+        niPath.c_str(), usedParams.empty() ? "<empty>" : "<redacted>");
 
   // 模块加载成功后，再尝试连接
   memKernel = std::make_unique<AndroidMemKernel>();
@@ -1090,6 +1091,15 @@ int CApi::ReadHwBpInfo(HANDLE hProcess,uint64_t hwaddr,uint64_t& nHitTotalCount,
 		vHwBpInfo.insert(vHwBpInfo.end(), vHandleHwBpInfo.begin(), vHandleHwBpInfo.end());
 	}
 	
+	// 协议层限制单次返回量，但累计命中数保持真实值以便上层判断丢弃数量。
+	constexpr size_t kMaxReturnedHitCount = 100000;
+	if (vHwBpInfo.size() > kMaxReturnedHitCount) {
+		vHwBpInfo.erase(
+			vHwBpInfo.begin(),
+			vHwBpInfo.end() -
+				static_cast<std::ptrdiff_t>(kMaxReturnedHitCount));
+	}
+
 	for (auto& item : vHwBpInfo) {
 		HW_HIT_INFO hwBpInfo = {};
 		hwBpInfo.hit_addr = item.hit_addr;

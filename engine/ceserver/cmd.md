@@ -1,6 +1,6 @@
 # MiniMem Socket 通信协议
 
-精简版后端（`socket_server`）的二进制通信协议。客户端通过 TCP Socket 连接，每条命令以**单字节 opcode** 开头，后跟对应的参数结构体/数据块。所有命令由 `CEServer.cpp` 的 `DispatchCommand_V2` 分发。
+精简版后端（`mini_server`）的二进制通信协议。客户端通过 TCP Socket 连接，每条命令以**单字节 opcode** 开头，后跟对应的参数结构体/数据块。所有命令由 `CEServer.cpp` 的 `DispatchCommand_V2` 分发。
 
 > 本精简版**不含**数据搜索 / 指针扫描 / 冻结 / SO注入 / 远程mmap / 线程上下文 / CE风格调试事件 / 旧式快照(Process32/Module32) 等命令。
 
@@ -31,7 +31,7 @@
 | CMD_KERNEL_REMOVEBREAKPOINT | 14 | 删除硬件断点 | 参数: int handle + u64 地址；返回: int |
 | CMD_KERNEL_SUSPENDBREAKPOINT | 15 | 暂停硬件断点 | 参数: int handle + u64 地址；返回: int |
 | CMD_KERNEL_RESUMEBREAKPOINT | 16 | 恢复硬件断点 | 参数: int handle + u64 地址；返回: int |
-| CMD_KERNEL_READHWBPINFO | 17 | 读取硬件断点命中记录 | 参数: int handle + u64 地址；返回: int 本次记录数 + u64 设备累计命中数 + N×`HW_HIT_INFO` |
+| CMD_KERNEL_READHWBPINFO | 17 | 读取硬件断点命中记录 | 参数: int handle + u64 地址；返回: int 本次记录数（最多 100000）+ u64 设备累计命中数 + N×`HW_HIT_INFO` |
 | CMD_SYMBOL_INIT | 18 | 初始化模块符号表 | 参数: `CeSymbolInitInput`；返回: `CeSymbolInitOutput`(result, totalCount) |
 | CMD_SYMBOL_GETLIST | 19 | 分页获取符号列表 | 参数: `CeGetSymbolListInput`；返回: `CeGetSymbolListOutput` + N×(`CeSymbolEntry`+名称) |
 | CMD_SYMBOL_FIND | 20 | 按名称查找 ELF 符号 | 参数: `CeFindSymbolInput` + 名称；返回: `CeFindSymbolOutput`(result, address) |

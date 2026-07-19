@@ -1,6 +1,6 @@
 # UE4 Actor 查看器脚本
 
-这些 Lua 脚本用于在 AMem 中查看 UE4 游戏的 Level Actor 数据。
+这些 Lua 脚本用于在 MiniMem 中查看 UE4 游戏的 Level Actor 数据。
 
 ## 文件说明
 
@@ -15,7 +15,7 @@
 - 点击详情按钮查看单个 Actor 信息
 
 **使用方法:**
-1. 在 AMem GUI 中打开 Lua Script 窗口
+1. 在 MiniMem GUI 中打开 Lua Script 窗口
 2. 点击 "Open ImGui Window" 按钮创建 ImGui 窗口
 3. 在 ImGui 窗口的脚本编辑区域加载脚本：
 ```lua
@@ -38,7 +38,7 @@ dofile("scripts/ue4_actor_viewer.lua")
 
 **使用方法:**
 ```lua
--- 在 AMem Lua 窗口中执行
+-- 在 MiniMem Lua 窗口中执行
 dofile("scripts/ue4_actor_list.lua")
 ```
 
@@ -47,7 +47,7 @@ dofile("scripts/ue4_actor_list.lua")
 ### 模块基址
 脚本中的 `libUE4_base` 需要根据实际情况调整。可以通过以下方式获取：
 
-1. 在 AMem 中使用 MCP 工具：
+1. 在 MiniMem 中使用 MCP 工具：
 ```
 /mcp amem get_module_base libUE4.so
 ```

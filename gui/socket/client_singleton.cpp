@@ -7,6 +7,26 @@
 
 // ==================== WinSocketClientMgr 实现 ====================
 
+WinSocketClientMgr::WinSocketClientMgr() {
+  auto poison = [] { DeviceSession::GetInstance().MarkPoisoned(); };
+  m_main_client.SetPoisonCallback(poison);
+  m_debug_client.SetPoisonCallback(poison);
+  m_error_client.SetPoisonCallback(std::move(poison));
+}
+
+WinSocketClientMgr::~WinSocketClientMgr() {
+  auto &session = DeviceSession::GetInstance();
+  auto lifecycle = session.AcquireLifecycle();
+  session.Disconnect();
+  CloseClients();
+}
+
+void WinSocketClientMgr::CloseClients() {
+  m_main_client.Close();
+  m_debug_client.Close();
+  m_error_client.Close();
+}
+
 WindowsSocketClient *WinSocketClientMgr::GetClient(PortType type) {
   switch (type) {
   case PORT_MAIN:  return &m_main_client;
@@ -25,70 +45,83 @@ std::mutex *WinSocketClientMgr::GetMutex(PortType type) {
   }
 }
 
+std::recursive_timed_mutex *WinSocketClientMgr::GetTransactionMutex(PortType type) {
+  switch (type) {
+  case PORT_MAIN:  return &m_main_transaction_mutex;
+  case PORT_DEBUG: return &m_debug_transaction_mutex;
+  case PORT_ERROR: return &m_error_transaction_mutex;
+  default:         return nullptr;
+  }
+}
+
 bool WinSocketClientMgr::ConnectMultiPort(const std::string &host, uint16_t Port) {
-  DisconnectMultiPort();
+  auto &session = DeviceSession::GetInstance();
+  auto lifecycle = session.AcquireLifecycle();
+  ResetTrackedKernelBreakpoints();
+  session.BeginConnect();
+  CloseClients();
   std::cout << "[MultiPort] Connecting to server..." << std::endl;
   std::cout << "  Main:  " << host << ":" << Port << std::endl;
-  AppContext::Get().clearProcess();
+  AppContext::Get().clearProcessForDisconnect();
 
   if (!m_main_client.Connect(host, Port)) {
     std::cerr << "[MultiPort] Failed to connect MAIN port" << std::endl;
+    session.FinishConnect(false);
     return false;
   }
   if (!m_debug_client.Connect(host, Port)) {
     std::cerr << "[MultiPort] Failed to connect DEBUG port" << std::endl;
-    m_main_client.Close();
+    CloseClients();
+    session.FinishConnect(false);
     return false;
   }
   if (!m_error_client.Connect(host, Port)) {
     std::cerr << "[MultiPort] Failed to connect ERROR port" << std::endl;
-    m_main_client.Close();
-    m_debug_client.Close();
+    CloseClients();
+    session.FinishConnect(false);
     return false;
   }
 
-  m_connected.store(true, std::memory_order_release);
+  session.FinishConnect(true);
   std::cout << "[MultiPort] All ports connected successfully!" << std::endl;
   return true;
 }
 
 void WinSocketClientMgr::DisconnectMultiPort() {
-  bool wasConnected = m_connected.exchange(false, std::memory_order_acq_rel);
-  AppContext::Get().clearProcess();
-  m_main_client.Close();
-  m_debug_client.Close();
-  m_error_client.Close();
-  if (wasConnected)
+  auto &session = DeviceSession::GetInstance();
+  auto lifecycle = session.AcquireLifecycle();
+  ResetTrackedKernelBreakpoints();
+  const bool hadSession =
+      session.GetState() != DeviceSession::State::Disconnected;
+  session.Disconnect();
+  AppContext::Get().clearProcessForDisconnect();
+  CloseClients();
+  if (hadSession)
     std::cout << "[MultiPort] All ports disconnected" << std::endl;
 }
 
-bool WinSocketClientMgr::IsMultiPortConnected() {
-  if (!m_connected.load(std::memory_order_acquire))
-    return false;
-  return m_main_client.IsConnected() && m_debug_client.IsConnected() &&
-         m_error_client.IsConnected();
+bool WinSocketClientMgr::IsMultiPortConnected() const {
+  return DeviceSession::GetInstance().IsConnected();
 }
 
 // ==================== 进程管理 ====================
 
-void SetCurrentPid(int pid) {
-  AppContext::Get().selectedPid.store(pid, std::memory_order_relaxed);
-}
-
-int GetCurrentPid() {
-  return AppContext::Get().selectedPid.load(std::memory_order_relaxed);
-}
-
 bool OpenProcessHandle(int pid, int &outHandle, PortType type) {
   outHandle = 0;
-  auto client = GetSocketMgr().GetClient(type);
-  if (!client->IsConnected())
+  auto &socketMgr = GetSocketMgr();
+  auto lease = socketMgr.AcquireRequestLease();
+  if (!lease)
     return false;
 
-  auto portMutex = GetSocketMgr().GetMutex(type);
+  auto client = socketMgr.GetClient(type);
+  if (!client)
+    return false;
+
+  auto portMutex = socketMgr.GetMutex(type);
   return SocketRequestManager::GetInstance().ExecuteRequestWithLock(
       portMutex, [&]() -> bool {
-        client->DrainPending();
+        if (!lease.isCurrent() || !client->IsConnected())
+          return false;
 #pragma pack(1)
         struct { unsigned char command; int pid; } op;
 #pragma pack()
@@ -99,40 +132,41 @@ bool OpenProcessHandle(int pid, int &outHandle, PortType type) {
         int handle = 0;
         if (!client->Receive(&handle, sizeof(handle)))
           return false;
-        if (handle == 0) {
-          AppContext::Get().processHandle.store(0, std::memory_order_relaxed);
+        if (handle == 0)
           return false;
-        }
         outHandle = handle;
-        AppContext::Get().processHandle.store(handle, std::memory_order_relaxed);
         return true;
       });
 }
 
 bool EnsureOpenHandle(int &outHandle, PortType type) {
+  (void)type;
   int handle = AppContext::Get().processHandle.load(std::memory_order_relaxed);
   if (handle) {
     outHandle = handle;
     return true;
   }
-  int pid = AppContext::Get().selectedPid.load(std::memory_order_relaxed);
-  if (pid == 0)
-    return false;
-  return OpenProcessHandle(pid, outHandle, type);
+  return false;
 }
 
 bool CloseProcessHandle(int handle, PortType type) {
   if (handle == 0)
     return true;
 
-  auto client = GetSocketMgr().GetClient(type);
-  if (!client || !client->IsConnected())
+  auto &socketMgr = GetSocketMgr();
+  auto lease = socketMgr.AcquireRequestLease();
+  if (!lease)
     return false;
 
-  auto portMutex = GetSocketMgr().GetMutex(type);
+  auto client = socketMgr.GetClient(type);
+  if (!client)
+    return false;
+
+  auto portMutex = socketMgr.GetMutex(type);
   return SocketRequestManager::GetInstance().ExecuteRequestWithLock(
       portMutex, [&]() -> bool {
-        client->DrainPending();
+        if (!lease.isCurrent() || !client->IsConnected())
+          return false;
         unsigned char command = CMD_CLOSEHANDLE;
         if (!client->Send(&command, sizeof(command)))
           return false;

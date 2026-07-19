@@ -10,13 +10,14 @@
 #include <cstdio>
 
 class Window;
+namespace Mem { class IMemService; }
 
 namespace Gui {
 	extern std::list<std::unique_ptr<Window>> windows;
 	extern std::list<std::pair<std::string, int>> logs;
 	extern std::mutex logsMutex;
 
-	bool mainLoop();
+	bool mainLoop(Mem::IMemService& service);
 	std::vector<std::pair<std::string, int>> getLogsSnapshot();
 
 	inline void clearLogs() {

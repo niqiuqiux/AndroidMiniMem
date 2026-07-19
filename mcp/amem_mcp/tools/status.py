@@ -53,7 +53,7 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
 
     @mcp.resource("amem://status")
     def resource_status() -> str:
-        """当前 AMem GUI 状态。"""
+        """当前 MiniMem GUI 状态。"""
         try:
             r = ipc.call_or_raise("get_status")
             connected = "已连接" if r["connected"] else "未连接"

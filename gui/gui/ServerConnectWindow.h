@@ -4,10 +4,11 @@
 #include "ConfigManager.h"
 #include <string>
 #include <functional>
+namespace Mem { class IMemService; }
 
 class ServerConnectWindow : public Window {
 public:
-	ServerConnectWindow();
+	explicit ServerConnectWindow(Mem::IMemService& service);
 	~ServerConnectWindow() override = default;
 
 	void onDraw() override;
@@ -23,10 +24,11 @@ private:
 
 	// 新增成员变量
 	int currentMemType;
-	char cardKeyBuf[256] = "1142192691366763";
+	char cardKeyBuf[256]{};
 	char KernelVersionBuf = '6';
 	std::string driverStatus;
 	std::string memTypeNames[5];
+	Mem::IMemService& service_;
 
 	void drawConnectionControls();
 	void drawDriverControls();
@@ -37,4 +39,4 @@ private:
 	// 配置相关方法
 	void loadConfig();
 	void saveConfig();
-}; 
+};

@@ -3,7 +3,7 @@
 #include "ColorScheme.h"
 #include "AppContext.h"
 #include "../imgui/imgui.h"
-#include "../socket/client_singleton.h"
+#include "../mem/IMemService.h"
 #include "Gui.h"
 
 
@@ -40,7 +40,8 @@ unsigned int ModulesWindow::getWindowFlags() const
     return ImGuiWindowFlags_NoDocking;
 }
 
-ModulesWindow::ModulesWindow()
+ModulesWindow::ModulesWindow(Mem::IMemService& service)
+	: service_(service)
 {
 	name = "模块列表";
 }
@@ -66,7 +67,7 @@ const char* ModulesWindow::getModuleTypeName(int type) const
 	}
 }
 
-bool ModulesWindow::passesFilter(const ModuleInfoItem& module) const
+bool ModulesWindow::passesFilter(const Mem::ModuleInfo& module) const
 {
 	// 模块名过滤
 	if (strlen(nameFilter) > 0) {
@@ -92,16 +93,39 @@ bool ModulesWindow::passesFilter(const ModuleInfoItem& module) const
 	return true;
 }
 
+bool ModulesWindow::refreshModules()
+{
+	const Mem::OperationContext context = service_.captureContext(true);
+	std::vector<Mem::ModuleInfo> loaded;
+	size_t offset = 0;
+	while (true) {
+		Mem::ModuleListRequest request;
+		request.offset = offset;
+		request.limit = Mem::kMaxModulePageSize;
+		auto result = service_.listModules(context, request);
+		if (!result.ok()) {
+			Gui::log("获取模块列表失败: %s", result.error().message.c_str());
+			return false;
+		}
+		auto& page = result.value();
+		loaded.insert(loaded.end(), page.items.begin(), page.items.end());
+		if (!page.nextOffset) {
+			break;
+		}
+		offset = *page.nextOffset;
+	}
+	modules = std::move(loaded);
+	Gui::log("获取到 %d 个模块", static_cast<int>(modules.size()));
+	return true;
+}
+
 void ModulesWindow::onDraw()
 {
 	// 第一行：刷新按钮和进程信息
 	if (ImGui::Button("刷新模块列表"))
 	{
-		std::vector<ModuleInfoItem> list;
-		if (FetchModuleList(list)) {
+		if (refreshModules()) {
 			hasData = true;
-			modules = std::move(list);
-			Gui::log("获取到 %d 个模块", (int)modules.size());
 		} else {
 			hasData = false;
 			Gui::log("获取模块列表失败 (请确保已连接并打开进程)");
@@ -109,7 +133,7 @@ void ModulesWindow::onDraw()
 	}
 	
 	ImGui::SameLine();
-	int pid = GetCurrentPid();
+	int pid = currentPid();
 	if (pid)
 		ImGui::Text("当前进程 PID: %d", pid);
 	else
@@ -117,10 +141,8 @@ void ModulesWindow::onDraw()
 
 	if (autoRefreshOnce) {
 		autoRefreshOnce = false;
-		std::vector<ModuleInfoItem> list;
-		if (FetchModuleList(list)) {
+		if (refreshModules()) {
 			hasData = true;
-			modules = std::move(list);
 		}
 	}
 
@@ -151,7 +173,7 @@ void ModulesWindow::onDraw()
 
 	if (hasData) {
 		// 统计过滤结果
-		std::vector<const ModuleInfoItem*> filteredModules;
+		std::vector<const Mem::ModuleInfo*> filteredModules;
 		for (const auto& module : modules) {
 			if (passesFilter(module)) {
 				filteredModules.push_back(&module);
@@ -180,7 +202,7 @@ void ModulesWindow::onDraw()
 				} else if (module.size >= 1024) {
 					ImGui::Text("%.1fK", module.size / 1024.0f);
 				} else {
-					ImGui::Text("%d", module.size);
+					ImGui::Text("%llu", static_cast<unsigned long long>(module.size));
 				}
 				
 				ImGui::TableSetColumnIndex(2);
@@ -227,7 +249,9 @@ void ModulesWindow::onDraw()
 					ImGui::BeginTooltip();
 					ImGui::Text("模块: %s", module.name.c_str());
 					ImGui::Text("基址: 0x%llX", (unsigned long long)module.base);
-					ImGui::Text("大小: %d 字节 (0x%X)", module.size, module.size);
+					ImGui::Text("大小: %llu 字节 (0x%llX)",
+						static_cast<unsigned long long>(module.size),
+						static_cast<unsigned long long>(module.size));
 					ImGui::Text("类型: %s (%d)", typeName, module.type);
 					ImGui::Text("标志: 0x%X", module.flag);
 					ImGui::Separator();
@@ -441,4 +465,4 @@ void ModulesWindow::drawFilterModal()
 		
 		ImGui::EndPopup();
 	}
-} 
+}

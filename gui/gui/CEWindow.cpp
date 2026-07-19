@@ -3,7 +3,7 @@
 #include "ColorScheme.h"
 #include "Gui.h"
 #include "../imgui/imgui.h"
-#include "../socket/client_singleton.h"
+#include "../mem/IMemService.h"
 #include "ModulesWindow.h"
 #include "LogWindow.h"
 
@@ -20,7 +20,40 @@
 #include <cctype>
 #include <vector>
 
-CEWindow::CEWindow()
+namespace {
+bool loadAllProcesses(Mem::IMemService& service,
+                      std::vector<Mem::ProcessInfo>& output,
+                      std::string& error) {
+    const Mem::OperationContext context = service.captureContext(false);
+    std::vector<Mem::ProcessInfo> loaded;
+    size_t offset = 0;
+    while (true) {
+        Mem::ProcessListRequest request;
+        request.offset = offset;
+        request.limit = Mem::kMaxProcessPageSize;
+        auto result = service.listProcesses(context, request);
+        if (!result.ok()) {
+            error = result.error().message;
+            return false;
+        }
+        auto& page = result.value();
+        loaded.insert(loaded.end(), page.items.begin(), page.items.end());
+        if (!page.nextOffset) {
+            output.swap(loaded);
+            error.clear();
+            return true;
+        }
+        if (*page.nextOffset <= offset) {
+            error = "process pagination did not advance";
+            return false;
+        }
+        offset = *page.nextOffset;
+    }
+}
+} // namespace
+
+CEWindow::CEWindow(Mem::IMemService& service)
+    : service_(service)
 {
     name = "MiniMem";
 }
@@ -87,7 +120,7 @@ void CEWindow::drawSelectedProcessBanner()
 
 void CEWindow::drawProcessSelectModal()
 {
-    static std::vector<ProcessInfoItem> list;
+    static std::vector<Mem::ProcessInfo> list;
     static char filterText[256] = "";
     static bool listLoadAttempted = false;
 
@@ -99,8 +132,9 @@ void CEWindow::drawProcessSelectModal()
         if (ImGui::Button("刷新")) {
             list.clear();
             listLoadAttempted = true;
-            if (!FetchProcessList(list))
-                Gui::log("获取进程列表失败，请检查服务器连接状态");
+            std::string error;
+            if (!loadAllProcesses(service_, list, error))
+                Gui::log("获取进程列表失败: %s", error.c_str());
         }
         ImGui::SameLine();
         ImGui::SetNextItemWidth(450.0f);
@@ -110,8 +144,9 @@ void CEWindow::drawProcessSelectModal()
         if (!listLoadAttempted) {
             list.clear();
             listLoadAttempted = true;
-            if (!FetchProcessList(list))
-                Gui::log("获取进程列表失败，请检查服务器连接状态");
+            std::string error;
+            if (!loadAllProcesses(service_, list, error))
+                Gui::log("获取进程列表失败: %s", error.c_str());
         }
 
         if (ImGui::BeginChild("proc_modal", ImVec2(600, 400), ImGuiChildFlags_Borders))
@@ -143,7 +178,18 @@ void CEWindow::drawProcessSelectModal()
                     ImGui::Text("%d", it.pid);
                     ImGui::TableSetColumnIndex(1);
                     if (ImGui::Selectable(it.name.c_str(), false, ImGuiSelectableFlags_SpanAllColumns)) {
-                        AppContext::Get().selectProcess(it.pid, it.name);
+                        Mem::OpenProcessRequest request;
+                        request.pid = it.pid;
+                        request.name = it.name;
+                        auto result = service_.openProcess(
+                            service_.captureContext(true), request);
+                        if (!result.ok()) {
+                            Gui::log("打开进程失败: %s",
+                                     result.error().message.c_str());
+                            continue;
+                        }
+                        Gui::log("进程已打开，句柄 %d",
+                                 result.value().target.processHandle);
                         ImGui::CloseCurrentPopup();
                         openProcessModal = false;
                         listLoadAttempted = false;
@@ -228,20 +274,20 @@ void CEWindow::onDraw()
 // 窗口管理方法 — 使用 Gui::getOrCreate 简化
 void CEWindow::openModulesWindow()
 {
-    auto* mw = Gui::getOrCreate<ModulesWindow>();
+    auto* mw = Gui::getOrCreate<ModulesWindow>(service_);
     if (mw) mw->triggerAutoRefresh();
 }
 
 void CEWindow::openLuaScriptWindow()
 {
 #ifdef HAVE_LUAJIT
-    Gui::getOrCreate<LuaScriptWindow>();
+    Gui::getOrCreate<LuaScriptWindow>(service_);
 #endif
 }
 
 void CEWindow::openServerConnectWindow()
 {
-    Gui::getOrCreate<ServerConnectWindow>();
+    Gui::getOrCreate<ServerConnectWindow>(service_);
 }
 
 void CEWindow::openLogWindow()

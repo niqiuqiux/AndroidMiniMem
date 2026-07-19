@@ -8,10 +8,11 @@
 class LuaScriptWindow;
 class ServerConnectWindow;
 class LogWindow;
+namespace Mem { class IMemService; }
 
 class CEWindow : public Window {
 public:
-    CEWindow();
+    explicit CEWindow(Mem::IMemService& service);
     unsigned int getWindowFlags() const override;
 
 protected:
@@ -31,4 +32,5 @@ private:
 
     // 状态变量
     bool openProcessModal = false;
+    Mem::IMemService& service_;
 };

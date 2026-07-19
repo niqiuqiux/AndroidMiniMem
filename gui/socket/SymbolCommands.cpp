@@ -27,7 +27,7 @@ bool SymbolInit(uint64_t moduleBase, int &outTotalCount, PortType port) {
         if (!client->Receive(&output, sizeof(output)))
             return false;
         if (!isValidCount(output.totalCount, kMaxSymbolTotalCount))
-            return false;
+            return SocketCommand::rejectMalformedResponse(client);
         outTotalCount = output.totalCount;
         return output.result == 0;
     });
@@ -58,7 +58,7 @@ bool SymbolGetList(int offset, int count,
         if (!isValidCount(output.totalCount, kMaxSymbolTotalCount) ||
             output.actualCount < 0 ||
             output.actualCount > count)
-            return false;
+            return SocketCommand::rejectMalformedResponse(client);
         std::vector<std::pair<uint64_t, std::string>> receivedSymbols;
         receivedSymbols.reserve(static_cast<size_t>(output.actualCount));
         for (int i = 0; i < output.actualCount; ++i) {
@@ -66,7 +66,7 @@ bool SymbolGetList(int offset, int count,
             if (!client->Receive(&entry, sizeof(entry)))
                 return false;
             if (!isValidCount(entry.nameSize, kMaxSymbolNameSize))
-                return false;
+                return SocketCommand::rejectMalformedResponse(client);
             std::string name;
             if (entry.nameSize > 0) {
                 name.resize(static_cast<size_t>(entry.nameSize));

@@ -1,6 +1,7 @@
 #include "ExceptionHandler.h"
 #include "gui/Gui.h"
 #include "ipc/IpcServer.h"
+#include "mem/SystemMemService.h"
 #include "renderer/AppWindow.h"
 
 #include <cstdio>
@@ -18,10 +19,11 @@ int main(int, char**) {
         return 1;
     }
 
-    IpcServer::GetInstance().Start(28100);
+    auto& memService = Mem::getSystemMemService();
+    IpcServer::GetInstance().Start(memService, 28100);
 
-    window.run([&window] {
-        if (!Gui::mainLoop()) {
+    window.run([&window, &memService] {
+        if (!Gui::mainLoop(memService)) {
             window.requestClose();
         }
     });

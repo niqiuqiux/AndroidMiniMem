@@ -12,9 +12,9 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
 
     @mcp.tool()
     def execute_lua(code: str, timeout_seconds: int = 30) -> str:
-        """在 AMem GUI 内执行 Lua 脚本。
+        """在 MiniMem GUI 内执行 Lua 脚本。
 
-        可使用 mem/process/scan/bp 等全部 Lua API。
+        可使用 mem/process/bp/symbol 等 MiniMem 保留的 Lua API。
         这是最强大的工具 — 可以编写任意复杂的自动化逻辑。
         Lua 引擎会在首次调用时自动初始化，无需手动打开 Lua 窗口。
 

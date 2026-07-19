@@ -1,8 +1,7 @@
 #include "ServerConnectWindow.h"
 #include "ColorScheme.h"
 #include "../imgui/imgui.h"
-#include "../socket/client_singleton.h"
-#include "../socket/client.hpp"
+#include "../mem/IMemService.h"
 #include "Gui.h"
 #include "version.h"
 #include "ConfigManager.h"
@@ -19,7 +18,8 @@ const char* getMemTypeName(const std::string (&names)[5], int memType)
 }
 } // namespace
 
-ServerConnectWindow::ServerConnectWindow()
+ServerConnectWindow::ServerConnectWindow(Mem::IMemService& service)
+	: service_(service)
 {
 	name = "服务器连接";
 	std::snprintf(hostBuf, sizeof(hostBuf), "%s", "127.0.0.1");
@@ -29,7 +29,6 @@ ServerConnectWindow::ServerConnectWindow()
 
 	// 初始化新增成员变量
 	currentMemType = 0;
-	//std::snprintf(cardKeyBuf, sizeof(cardKeyBuf), "%s", "");
 	driverStatus = "未初始化";
 	memTypeNames[0] = "空";
 	memTypeNames[1] = "IO";
@@ -46,13 +45,16 @@ ServerConnectWindow::ServerConnectWindow()
 void ServerConnectWindow::updateStatus(bool ok, const char* action)
 {
 	if (ok) {
-		ServerVersionInfo versionInfo;
-		if (FetchServerVersion(versionInfo)) {
+		auto versionInfo = service_.serverVersion(
+			service_.captureContext(false));
+		if (versionInfo.ok()) {
 			status = std::string(action) + ": 已连接到 " + hostBuf + ":" + std::to_string(port);
 			Gui::log("%s", status.c_str());
-			Gui::log("服务器版本: %d", versionInfo.version);
-			Gui::log("服务器版本字符串: %s", versionInfo.versionString.c_str());
-			status = status  +"\n" + " (版本: " + versionInfo.versionString + ")";
+			Gui::log("服务器版本: %d", versionInfo.value().version);
+			Gui::log("服务器版本字符串: %s",
+			         versionInfo.value().versionString.c_str());
+			status = status + "\n" + " (版本: " +
+			         versionInfo.value().versionString + ")";
 			
 			// 连接成功后更新MemType
 			updateMemType();
@@ -68,11 +70,10 @@ void ServerConnectWindow::updateStatus(bool ok, const char* action)
 
 void ServerConnectWindow::updateMemType()
 {
-	auto client = GetSocketMgr().GetClient(PORT_MAIN);
-	if (client->IsConnected()) {
-		int memType = 0;
-		if (GetMemType(memType)) {
-			currentMemType = memType;
+	if (service_.connectionSnapshot().connected) {
+		auto memType = service_.memoryType(service_.captureContext(false));
+		if (memType.ok()) {
+			currentMemType = memType.value().type;
 			Gui::log("当前内存类型: %s (%d)", getMemTypeName(memTypeNames, currentMemType), currentMemType);
 		} else {
 			Gui::log("获取内存类型失败，请检查连接状态");
@@ -85,24 +86,27 @@ void ServerConnectWindow::initializeDriver()
 {
 	std::string cardKey = std::string(cardKeyBuf);
 	std::string kernelVersion = std::string(1, KernelVersionBuf);
-	std::string resultStr;
-	
+
 	if (cardKey.empty()) {
 		driverStatus = "初始化失败: 卡密不能为空";
 		Gui::log("驱动初始化失败: 卡密不能为空");
 		return;
 	}
 	
-	Gui::log("正在初始化驱动，卡密: %s", cardKey.c_str());
+	Gui::log("正在初始化驱动");
 	cardKey = cardKey +"-"+ kernelVersion;
-	if (InitDriver(cardKey, resultStr)) {
-		driverStatus = "初始化成功: " + resultStr;
-		Gui::log("驱动初始化成功: %s", resultStr.c_str());
+	Mem::DriverInitializeRequest request;
+	request.card = cardKey;
+	auto result = service_.initializeDriver(
+		service_.captureContext(false), request);
+	if (result.ok()) {
+		driverStatus = "初始化成功: " + result.value().message;
+		Gui::log("驱动初始化成功: %s", result.value().message.c_str());
 		// 初始化成功后更新MemType
 		updateMemType();
 	} else {
-		driverStatus = "初始化失败: " + resultStr;
-		Gui::log("驱动初始化失败: %s", resultStr.c_str());
+		driverStatus = "初始化失败: " + result.error().message;
+		Gui::log("驱动初始化失败: %s", result.error().message.c_str());
 	}
 }
 
@@ -122,31 +126,36 @@ void ServerConnectWindow::drawConnectionControls() {
     saveConfig();
   ImGui::Text("状态: %s", status.c_str());
 
-  auto client = GetSocketMgr().GetClient(PORT_MAIN);
-  if (!client->IsConnected()) {
+  if (!service_.connectionSnapshot().connected) {
     if (ImGui::Button("连接")) {
       if (!isValidPort(port)) {
         status = "连接: 失败 -> invalid port";
         Gui::log("连接失败: invalid port %d", port);
         return;
       }
-      bool ok = GetSocketMgr().ConnectMultiPort(hostBuf, static_cast<uint16_t>(port));
+      Mem::ConnectRequest request;
+      request.host = hostBuf;
+      request.port = static_cast<uint16_t>(port);
+      bool ok = service_.connect(service_.captureContext(false), request).ok();
       updateStatus(ok, "连接");
       if (ok) saveConfig();  // 记住成功连接的主机/端口
     }
   } else {
     if (ImGui::Button("断开连接")) {
-      GetSocketMgr().DisconnectMultiPort();
+      (void)service_.disconnect(service_.captureContext(false));
       updateStatus(false, "断开连接");
     }
   }
 
-  if (autoReconnect && !client->IsConnected()) {
+  if (autoReconnect && !service_.connectionSnapshot().connected) {
     if (!isValidPort(port)) {
       status = "自动重连: 失败 -> invalid port";
       return;
     }
-    bool ok = GetSocketMgr().ConnectMultiPort(hostBuf, static_cast<uint16_t>(port));
+    Mem::ConnectRequest request;
+    request.host = hostBuf;
+    request.port = static_cast<uint16_t>(port);
+    bool ok = service_.connect(service_.captureContext(false), request).ok();
     if (ok)
       updateStatus(true, "自动重连");
   }
@@ -165,10 +174,8 @@ void ServerConnectWindow::drawDriverControls() {
   }
 
   // 卡密输入和驱动初始化
-  bool cardKeyChanged = false;
-  if (ImGui::InputText("卡密", cardKeyBuf, IM_ARRAYSIZE(cardKeyBuf))) {
-    cardKeyChanged = true;
-  }
+  ImGui::InputText("卡密", cardKeyBuf, IM_ARRAYSIZE(cardKeyBuf),
+                   ImGuiInputTextFlags_Password);
   // 列表显示5 6
   const char *kernelVersionList[] = {"5系", "6系"};
   int currentKernelVersion = (KernelVersionBuf == '5') ? 0 : 1;
@@ -182,12 +189,11 @@ void ServerConnectWindow::drawDriverControls() {
   ImGui::PopItemWidth();
   
   // 如果配置改变，保存配置
-  if (cardKeyChanged || kernelVersionChanged) {
+  if (kernelVersionChanged) {
     saveConfig();
   }
 
-  auto client = GetSocketMgr().GetClient(PORT_MAIN);
-  if (client->IsConnected()) {
+  if (service_.connectionSnapshot().connected) {
     if (ImGui::Button("初始化驱动")) {
       initializeDriver();
     }
@@ -213,14 +219,16 @@ void ServerConnectWindow::loadConfig()
 	port = config.getInt("port", port);
 	autoReconnect = config.getInt("autoReconnect", autoReconnect ? 1 : 0) != 0;
 
-	// 加载卡密
-	std::string cardKey = config.getString("cardKey", "1142192691366763");
-	std::snprintf(cardKeyBuf, sizeof(cardKeyBuf), "%s", cardKey.c_str());
+	// 旧版本曾明文保存卡密，加载时主动清除遗留配置。
+	const bool removedLegacyCard = config.remove("cardKey");
 
 	// 加载内核版本
 	KernelVersionBuf = config.getChar("kernelVersion", '6');
 
-	Gui::log("配置已加载 (host=%s:%d, 卡密=%s, 内核=%c系)", hostBuf, port, cardKeyBuf, KernelVersionBuf);
+	Gui::log("配置已加载 (host=%s:%d, 内核=%c系)", hostBuf, port, KernelVersionBuf);
+	if (removedLegacyCard && !config.saveConfig("config.ini")) {
+		Gui::log("旧版卡密配置清理失败: 无法写入 config.ini");
+	}
 }
 
 void ServerConnectWindow::saveConfig()
@@ -232,15 +240,12 @@ void ServerConnectWindow::saveConfig()
 	config.setInt("port", port);
 	config.setInt("autoReconnect", autoReconnect ? 1 : 0);
 
-	// 保存卡密
-	config.setString("cardKey", std::string(cardKeyBuf));
-
 	// 保存内核版本
 	config.setChar("kernelVersion", KernelVersionBuf);
 
 	// 保存到文件
 	if (config.saveConfig("config.ini")) {
-		Gui::log("配置已保存 (host=%s:%d, 卡密=%s, 内核=%c系)", hostBuf, port, cardKeyBuf, KernelVersionBuf);
+		Gui::log("配置已保存 (host=%s:%d, 内核=%c系)", hostBuf, port, KernelVersionBuf);
 	} else {
 		Gui::log("配置保存失败: 无法写入 config.ini");
 	}

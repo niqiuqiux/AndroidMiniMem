@@ -1,5 +1,6 @@
 #include "LuaEngine.h"
 #include "LuaAPI.h"
+#include "../mem/IMemService.h"
 #include <fstream>
 #include <sstream>
 #include <filesystem>
@@ -37,6 +38,31 @@ struct LuaTimeoutContext {
 struct LuaCaptureContext {
     std::string* output = nullptr;
     bool truncated = false;
+};
+
+class LuaOperationBinding {
+public:
+    LuaOperationBinding(
+        lua_State* state,
+        Mem::IMemService& service,
+        std::chrono::steady_clock::time_point deadline =
+            (std::chrono::steady_clock::time_point::max)())
+        : state_(state), context_(service.captureContext(true)) {
+        context_.deadline = deadline;
+        previous_ = LuaAPI::BindOperationContext(state_, &context_);
+    }
+
+    ~LuaOperationBinding() {
+        LuaAPI::BindOperationContext(state_, previous_);
+    }
+
+    LuaOperationBinding(const LuaOperationBinding&) = delete;
+    LuaOperationBinding& operator=(const LuaOperationBinding&) = delete;
+
+private:
+    lua_State* state_ = nullptr;
+    Mem::OperationContext context_;
+    Mem::OperationContext* previous_ = nullptr;
 };
 
 void LuaTimeoutHook(lua_State* L, lua_Debug*) {
@@ -86,11 +112,15 @@ LuaEngine& LuaEngine::GetInstance() {
     return instance;
 }
 
-bool LuaEngine::Initialize() {
+bool LuaEngine::Initialize(Mem::IMemService& service) {
     std::lock_guard<std::mutex> lock(mutex);
     
     if (initialized) {
-        return true;
+        if (memService_ == &service) {
+            return true;
+        }
+        lastError = "Lua engine is already bound to another memory service";
+        return false;
     }
 
     // 创建Lua状态机
@@ -104,6 +134,7 @@ bool LuaEngine::Initialize() {
     RegisterStandardLibs();
     
     // 注册自定义API
+    memService_ = &service;
     RegisterAPIs();
 
     initialized = true;
@@ -119,6 +150,7 @@ void LuaEngine::Shutdown() {
     }
     
     initialized = false;
+    memService_ = nullptr;
     loadedScripts.clear();
     callbacks.clear();
     lastError.clear();
@@ -139,7 +171,7 @@ void LuaEngine::RegisterAPIs() {
     if (!L) return;
     
     // 注册所有自定义API
-    LuaAPI::RegisterAll(L);
+    LuaAPI::RegisterAll(L, *memService_);
 }
 
 bool LuaEngine::ExecuteFile(const std::string& filepath) {
@@ -167,6 +199,7 @@ bool LuaEngine::ExecuteFileLocked(const std::string& filepath) {
     }
 
     // 执行代码
+    LuaOperationBinding operation(L, *memService_);
     result = lua_pcall(L, 0, 0, 0);
     if (result != LUA_OK) {
         lastError = GetLuaError(L);
@@ -200,6 +233,7 @@ bool LuaEngine::ExecuteString(const std::string& code, const std::string& chunkN
     }
 
     // 执行代码
+    LuaOperationBinding operation(L, *memService_);
     result = lua_pcall(L, 0, 0, 0);
     if (result != LUA_OK) {
         lastError = GetLuaError(L);
@@ -271,6 +305,10 @@ bool LuaEngine::ExecuteStringCapture(const std::string& code,
         lua_sethook(L, LuaTimeoutHook, LUA_MASKCOUNT, kLuaTimeoutInstructionInterval);
     }
 
+    const auto operationDeadline = useTimeout
+        ? timeoutContext.deadline
+        : (std::chrono::steady_clock::time_point::max)();
+    LuaOperationBinding operation(L, *memService_, operationDeadline);
     result = lua_pcall(L, 0, 0, 0);
     bool ok = (result == LUA_OK);
     if (!ok) {
@@ -347,6 +385,7 @@ bool LuaEngine::CallCallback(const std::string& name, int nargs, int nresults) {
     }
 
     // 调用函数（参数已经在栈上）
+    LuaOperationBinding operation(L, *memService_);
     int result = lua_pcall(L, nargs, nresults, 0);
     if (result != LUA_OK) {
         lastError = GetLuaError(L);

@@ -15,6 +15,7 @@ set(PROTOCOL_VERSION "${PROTOCOL_VERSION_MAJOR}.${PROTOCOL_VERSION_MINOR}.${PROT
 project(MiniMemClient VERSION ${PROJECT_VERSION})
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+include(CTest)
 
 # 渲染后端选项
 if(WIN32)
@@ -183,6 +184,7 @@ endif()
 
 # Socket 协议层：精简版无搜索/冻结命令
 set(SOCKET_SOURCES
+    socket/DeviceSession.cpp
     socket/client_singleton.cpp
     socket/ProcessCommands.cpp
     socket/MemoryCommands.cpp
@@ -190,11 +192,17 @@ set(SOCKET_SOURCES
     socket/SymbolCommands.cpp
 )
 
+set(MEM_SOURCES
+    mem/MemService.cpp
+    mem/SystemMemService.cpp
+)
+
 set(RENDERER_SOURCES
     renderer/StyleSetup.cpp
 )
 
 set(IPC_SOURCES
+    ipc/IpcHttpRequest.cpp
     ipc/IpcServer.cpp
 )
 
@@ -241,6 +249,7 @@ add_executable(MiniMemClient
     ${IMGUI_SOURCES}
     ${GUI_SOURCES}
     ${SOCKET_SOURCES}
+    ${MEM_SOURCES}
     ${RENDERER_SOURCES}
     ${IPC_SOURCES}
     ${LUA_SOURCES}
@@ -254,7 +263,7 @@ endif()
 
 # 包含目录
 target_include_directories(MiniMemClient PRIVATE
-    imgui imgui/backends gui lua renderer utils ipc
+    imgui imgui/backends gui lua renderer utils ipc mem socket
     ${CMAKE_SOURCE_DIR}/third_party
     ${CMAKE_BINARY_DIR}/generated
 )
@@ -264,6 +273,56 @@ if(HAVE_CAPSTONE)
 endif()
 if(HAVE_KEYSTONE)
     target_include_directories(MiniMemClient PRIVATE ${KEYSTONE_INCLUDE_DIRS})
+endif()
+
+if(BUILD_TESTING)
+    add_executable(minimem_mem_service_tests
+        tests/MemServiceTests.cpp
+        mem/MemService.cpp
+    )
+    target_include_directories(minimem_mem_service_tests PRIVATE mem)
+    add_test(NAME minimem_mem_service
+             COMMAND minimem_mem_service_tests)
+
+    add_executable(minimem_device_session_tests
+        tests/DeviceSessionTests.cpp
+        socket/DeviceSession.cpp
+    )
+    target_include_directories(minimem_device_session_tests PRIVATE socket)
+    add_test(NAME minimem_device_session
+             COMMAND minimem_device_session_tests)
+
+    add_executable(minimem_config_security_tests
+        tests/ConfigSecurityTests.cpp
+        gui/ConfigManager.cpp
+    )
+    target_include_directories(minimem_config_security_tests PRIVATE gui)
+    add_test(NAME minimem_config_security
+             COMMAND minimem_config_security_tests)
+
+    add_executable(minimem_ipc_http_request_tests
+        tests/IpcHttpRequestTests.cpp
+        ipc/IpcHttpRequest.cpp
+    )
+    target_include_directories(minimem_ipc_http_request_tests PRIVATE ipc)
+    add_test(NAME minimem_ipc_http_request
+             COMMAND minimem_ipc_http_request_tests)
+
+    add_executable(minimem_socket_safety_tests
+        tests/SocketSafetyTests.cpp
+    )
+    target_include_directories(minimem_socket_safety_tests PRIVATE socket)
+    if(WIN32)
+        target_link_libraries(minimem_socket_safety_tests PRIVATE ws2_32)
+    endif()
+    add_test(NAME minimem_socket_safety
+             COMMAND minimem_socket_safety_tests)
+
+    add_test(
+        NAME minimem_mem_service_boundary
+        COMMAND ${CMAKE_COMMAND}
+            -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
+            -P ${CMAKE_SOURCE_DIR}/tests/VerifyMemServiceBoundary.cmake)
 endif()
 if(HAVE_LUAJIT)
     target_include_directories(MiniMemClient PRIVATE ${LUAJIT_INCLUDE})

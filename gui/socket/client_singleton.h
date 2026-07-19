@@ -3,10 +3,12 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
 #include "client.hpp"
+#include "DeviceSession.h"
 
 
 // 端口类型枚举（与服务端保持一致）
@@ -32,16 +34,20 @@ private:
   std::mutex m_debug_mutex;
   std::mutex m_error_mutex;
 
-  // 连接状态（原子操作）
-  std::atomic<bool> m_connected{false};
+  // 业务事务锁允许同一线程在复合操作内重入底层命令。
+  std::recursive_timed_mutex m_main_transaction_mutex;
+  std::recursive_timed_mutex m_debug_transaction_mutex;
+  std::recursive_timed_mutex m_error_transaction_mutex;
 
   // 禁止拷贝和赋值
   WinSocketClientMgr(const WinSocketClientMgr &) = delete;
   WinSocketClientMgr &operator=(const WinSocketClientMgr &) = delete;
 
   // 私有构造函数（单例模式）
-  WinSocketClientMgr() = default;
-  ~WinSocketClientMgr() { DisconnectMultiPort(); }
+  WinSocketClientMgr();
+  ~WinSocketClientMgr();
+
+  void CloseClients();
 
 public:
   // 获取单例实例
@@ -55,6 +61,19 @@ public:
 
   // 获取对应端口的锁
   std::mutex *GetMutex(PortType type);
+  std::recursive_timed_mutex *GetTransactionMutex(PortType type);
+
+  DeviceSession::RequestLease AcquireRequestLease() {
+    return DeviceSession::GetInstance().AcquireRequest();
+  }
+
+  uint64_t GetConnectionGeneration() const {
+    return DeviceSession::GetInstance().GetGeneration();
+  }
+
+  bool IsConnectionPoisoned() const {
+    return DeviceSession::GetInstance().IsPoisoned();
+  }
 
   // 连接到服务器的所有端口
   bool ConnectMultiPort(const std::string &host, uint16_t Port);
@@ -63,7 +82,7 @@ public:
   void DisconnectMultiPort();
 
   // 检查多端口是否已连接
-  bool IsMultiPortConnected();
+  bool IsMultiPortConnected() const;
 
 };
 
@@ -82,6 +101,14 @@ inline void DisconnectMultiPort() { GetSocketMgr().DisconnectMultiPort(); }
 
 inline bool IsMultiPortConnected() {
   return GetSocketMgr().IsMultiPortConnected();
+}
+
+inline bool IsConnectionPoisoned() {
+  return GetSocketMgr().IsConnectionPoisoned();
+}
+
+inline uint64_t GetConnectionGeneration() {
+  return GetSocketMgr().GetConnectionGeneration();
 }
 
 inline WindowsSocketClient *GetPortClient(PortType type) {
@@ -118,6 +145,16 @@ enum MemType {
 
 bool FetchServerVersion(ServerVersionInfo &outInfo, PortType type = PORT_MAIN);
 bool GetMemType(int &outType, PortType type = PORT_MAIN);
+
+struct DriverInitializationIoResult {
+  bool requestStarted = false;
+  bool responseReceived = false;
+  bool accepted = false;
+  std::string message;
+};
+
+DriverInitializationIoResult InitDriverTracked(
+    const std::string &card, PortType type = PORT_MAIN);
 bool InitDriver(std::string &Card, std::string &resStr,
                 PortType type = PORT_MAIN);
 
@@ -125,8 +162,6 @@ bool FetchProcessList(std::vector<ProcessInfoItem> &outList,
                       PortType type = PORT_MAIN);
 
 // Process / Module helpers
-void SetCurrentPid(int pid);
-int GetCurrentPid();
 bool OpenProcessHandle(int pid, int &outHandle, PortType type = PORT_MAIN);
 bool EnsureOpenHandle(int &outHandle, PortType type = PORT_MAIN);
 bool CloseProcessHandle(int handle, PortType type = PORT_MAIN);
@@ -155,6 +190,16 @@ bool ReadBratchAddr(
     std::vector<std::pair<uint64_t, std::vector<uint8_t>> /*addr,data*/> &out,
     PortType type = PORT_MAIN);
 
+struct MemoryWriteIoResult {
+  bool requestStarted = false;
+  bool responseReceived = false;
+  int32_t writtenBytes = 0;
+};
+
+MemoryWriteIoResult WriteProcessMemoryDetailed(
+    uint64_t address, const std::vector<unsigned char> &data,
+    PortType type = PORT_MAIN);
+
 // outWritten（可选）回传连续写入的字节数：返回 true 表示全部写入；
 // 返回 false 且 *outWritten>0 表示【部分写入】(已产生副作用)；*outWritten==0 表示完全失败。
 bool WriteProcessMemoryBytes(uint64_t address, uint32_t size,
@@ -173,6 +218,21 @@ bool ResolveModuleOffsetChain(uint64_t &outAddress,
                               PortType type = PORT_MAIN);
 
 // 内核断点相关
+struct BreakpointMutationIoResult {
+  bool requestStarted = false;
+  bool responseReceived = false;
+  bool applied = false;
+};
+
+BreakpointMutationIoResult SetKernelBreakpointTracked(
+    uint64_t address, uint32_t bpType, uint32_t bpSize,
+    PortType type = PORT_MAIN);
+BreakpointMutationIoResult RemoveKernelBreakpointTracked(
+    uint64_t address, PortType type = PORT_MAIN);
+BreakpointMutationIoResult SuspendKernelBreakpointTracked(
+    uint64_t address, PortType type = PORT_MAIN);
+BreakpointMutationIoResult ResumeKernelBreakpointTracked(
+    uint64_t address, PortType type = PORT_MAIN);
 bool SetKernelBreakpoint(uint64_t address, uint32_t bpType, uint32_t bpSize,
                          PortType type = PORT_MAIN);
 bool RemoveKernelBreakpoint(uint64_t address, PortType type = PORT_MAIN);
@@ -182,6 +242,7 @@ bool ReadKernelBreakpointInfo(uint64_t address, std::vector<HW_HIT_INFO> &infos,
                               PortType type = PORT_MAIN,
                               uint64_t *outTotalHits = nullptr);  // 回传设备累计命中数
 bool ClearTrackedKernelBreakpoints(PortType type = PORT_MAIN);
+void ResetTrackedKernelBreakpoints();
 
 // ELF 符号接口
 bool SymbolInit(uint64_t moduleBase, int &outTotalCount,

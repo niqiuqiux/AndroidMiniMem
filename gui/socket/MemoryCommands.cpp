@@ -62,7 +62,11 @@ bool ReadProcessMemoryBytes(uint64_t address, uint32_t size,
             return false;
         }
 
-        if (outHdr.read <= 0 || static_cast<uint32_t>(outHdr.read) > size) {
+        if (outHdr.read < 0 || static_cast<uint32_t>(outHdr.read) > size) {
+            out.clear();
+            return SocketCommand::rejectMalformedResponse(client);
+        }
+        if (outHdr.read == 0) {
             out.clear();
             return false;
         }
@@ -70,6 +74,43 @@ bool ReadProcessMemoryBytes(uint64_t address, uint32_t size,
         out.resize(static_cast<size_t>(outHdr.read));
         return true;
     });
+}
+
+MemoryWriteIoResult WriteProcessMemoryDetailed(
+    uint64_t address, const std::vector<unsigned char> &data, PortType port) {
+    MemoryWriteIoResult result;
+    if (data.empty() || data.size() >
+            static_cast<size_t>((std::numeric_limits<uint32_t>::max)()) ||
+        !isValidReadSize(static_cast<uint32_t>(data.size()))) {
+        return result;
+    }
+
+    const uint32_t size = static_cast<uint32_t>(data.size());
+    (void)SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+#pragma pack(1)
+        struct { unsigned char command; CeWriteProcessMemoryInput input; } op;
+#pragma pack()
+        op.command = CMD_WRITEPROCESSMEMORY;
+        op.input.handle = handle;
+        op.input.address = address;
+        op.input.size = size;
+        if (!client->Send(&op, sizeof(op)))
+            return false;
+        result.requestStarted = true;
+        if (!client->Send(data.data(), data.size()))
+            return false;
+        CeWriteProcessMemoryOutput output{};
+        if (!client->Receive(&output, sizeof(output)))
+            return false;
+        result.responseReceived = true;
+        result.writtenBytes = output.written;
+        if (output.written < 0 ||
+            static_cast<uint32_t>(output.written) > size) {
+            return SocketCommand::rejectMalformedResponse(client);
+        }
+        return true;
+    });
+    return result;
 }
 
 bool WriteProcessMemoryBytes(uint64_t address, uint32_t size,
@@ -80,26 +121,12 @@ bool WriteProcessMemoryBytes(uint64_t address, uint32_t size,
     if (!isValidReadSize(size) || data.size() != static_cast<size_t>(size))
         return false;
 
-    return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
-#pragma pack(1)
-        struct { unsigned char command; CeWriteProcessMemoryInput input; } op;
-#pragma pack()
-        op.command = CMD_WRITEPROCESSMEMORY;
-        op.input.handle = handle;
-        op.input.address = address;
-        op.input.size = size;
-        if (!client->Send(&op, sizeof(op)))
-            return false;
-        if (!client->Send(data.data(), data.size()))
-            return false;
-        CeWriteProcessMemoryOutput output{};
-        if (!client->Receive(&output, sizeof(output)))
-            return false;
-        // 连续前缀语义：output.written 为连续写入字节数，可 < size（部分写入）
-        if (outWritten)
-            *outWritten = output.written;
-        return output.written == static_cast<int32_t>(size);  // 仅全部写入才算成功
-    });
+    const MemoryWriteIoResult result =
+        WriteProcessMemoryDetailed(address, data, port);
+    if (outWritten)
+        *outWritten = result.writtenBytes;
+    return result.responseReceived &&
+           result.writtenBytes == static_cast<int32_t>(size);
 }
 
 bool ReadProcessMemory_(uint64_t address, uint32_t size, void *out,
@@ -123,7 +150,9 @@ bool ReadProcessMemory_(uint64_t address, uint32_t size, void *out,
             return false;
         if (!client->Receive(out, size))
             return false;
-        if (Realread <= 0 || static_cast<uint32_t>(Realread) > size)
+        if (Realread < 0 || static_cast<uint32_t>(Realread) > size)
+            return SocketCommand::rejectMalformedResponse(client);
+        if (Realread == 0)
             return false;
         return true;
     });
@@ -149,14 +178,16 @@ bool ReadBratchMemory(uint64_t address, uint32_t size,
         int len = 0;
         if (!client->Receive(&len, sizeof(len)))
             return false;
-        if (len <= 0) {
+        if (len == 0) {
             return true;
         }
+        if (len < 0)
+            return SocketCommand::rejectMalformedResponse(client);
 
         const uint64_t expectedPages =
             (static_cast<uint64_t>(size) + kBatchPageSize - 1) / kBatchPageSize;
         if (static_cast<uint64_t>(len) > expectedPages)
-            return false;
+            return SocketCommand::rejectMalformedResponse(client);
 
         std::vector<std::pair<uint64_t, std::vector<uint8_t>>> receivedPages;
         receivedPages.reserve(static_cast<size_t>(len));
@@ -201,7 +232,7 @@ bool ReadBratchAddr(std::vector<std::pair<uint64_t, int32_t>> &addrs,
         if (!client->Receive(&result, sizeof(result)))
             return false;
         if (result < 0 || result > len)
-            return false;
+            return SocketCommand::rejectMalformedResponse(client);
 
         std::vector<std::pair<uint64_t, std::vector<uint8_t>>> receivedItems;
         receivedItems.reserve(static_cast<size_t>(result));
@@ -213,8 +244,14 @@ bool ReadBratchAddr(std::vector<std::pair<uint64_t, int32_t>> &addrs,
             uint32_t vlen = 0;
             if (!client->Receive(&vlen, sizeof(vlen)))
                 return false;
-            if (vlen > input[i].size)
-                return false;
+            uint32_t requestedSize = 0;
+            for (const auto& request : input) {
+                if (request.addr == addr) {
+                    requestedSize = (std::max)(requestedSize, request.size);
+                }
+            }
+            if (requestedSize == 0 || vlen > requestedSize)
+                return SocketCommand::rejectMalformedResponse(client);
             std::vector<unsigned char> data(vlen);
             if (vlen > 0 && !client->Receive(data.data(), data.size()))
                 return false;

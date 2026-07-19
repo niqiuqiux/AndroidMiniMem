@@ -35,7 +35,7 @@ CMD_SYMBOL_GETLIST           = 19
 CMD_SYMBOL_FIND              = 20
 CMD_GETSOBASE                = 21
 
-# ── 数据类型 (MemoryTypes.h TYPE enum) ───────────────────────────
+# ── 基础内存读写数据类型 ─────────────────────────────────────────
 TYPE_BYTE   = 1
 TYPE_WORD   = 2
 TYPE_DWORD  = 4

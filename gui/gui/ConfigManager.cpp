@@ -96,6 +96,10 @@ void ConfigManager::setChar(const std::string& key, char value) {
     configMap[key] = std::string(1, value);
 }
 
+bool ConfigManager::remove(const std::string& key) {
+    return configMap.erase(key) != 0;
+}
+
 std::string ConfigManager::trim(const std::string& str) const {
     size_t first = str.find_first_not_of(" \t\r\n");
     if (first == std::string::npos) {

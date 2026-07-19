@@ -11,7 +11,7 @@
 cmake -S . -B build -DANDROID_NDK=<ndk> -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 ```
 
-产物 `bin/socket_server`（设备端常驻服务，默认监听 0.0.0.0:52736）。内核模式还需把 newkernelmem 构建出的 `NI.ko` 放到设备上。
+产物 `bin/mini_server`（设备端常驻服务，默认监听 0.0.0.0:52736）。内核模式还需把 newkernelmem 构建出的 `NI.ko` 放到设备上。
 
 ## 架构（分层）
 

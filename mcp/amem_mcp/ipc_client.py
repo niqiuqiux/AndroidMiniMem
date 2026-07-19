@@ -1,4 +1,4 @@
-"""HTTP JSON 客户端 — 与 AMem GUI 内嵌的 IpcServer 通信。"""
+"""HTTP JSON 客户端：与 MiniMem GUI 内嵌的 IpcServer 通信。"""
 
 from __future__ import annotations
 
@@ -87,7 +87,7 @@ def _json_error_from_http_error(e: urllib.error.HTTPError) -> dict:
 
 
 class IpcClient:
-    """通过 HTTP JSON 协议与 AMem GUI 通信。"""
+    """通过 HTTP JSON 协议与 MiniMem GUI 通信。"""
 
     def __init__(self, host: str = "127.0.0.1", port: int = 28100):
         self.host = host
@@ -133,19 +133,19 @@ class IpcClient:
             except ConnectionRefusedError:
                 return {
                     "success": False,
-                    "error": "AMem GUI 未启动或 IPC 端口未监听，请先启动 AMem GUI",
+                    "error": "MiniMem GUI 未启动或 IPC 端口未监听，请先启动 MiniMem GUI",
                 }
             except urllib.error.URLError as e:
                 reason = getattr(e, "reason", e)
                 if isinstance(reason, ConnectionRefusedError):
                     return {
                         "success": False,
-                        "error": "AMem GUI 未启动或 IPC 端口未监听，请先启动 AMem GUI",
+                        "error": "MiniMem GUI 未启动或 IPC 端口未监听，请先启动 MiniMem GUI",
                     }
                 if isinstance(reason, TimeoutError):
                     last_error = f"操作超时 ({timeout}s)，方法: {method}"
                     continue
-                last_error = f"连接 AMem GUI 失败: {reason}"
+                last_error = f"连接 MiniMem GUI 失败: {reason}"
                 continue
             except TimeoutError:
                 last_error = f"操作超时 ({timeout}s)，方法: {method}"

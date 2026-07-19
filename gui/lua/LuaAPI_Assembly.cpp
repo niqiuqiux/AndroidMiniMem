@@ -5,7 +5,7 @@
 #include "LuaAPI.h"
 #include "../gui/AssemblyHelper.h"
 #include "../gui/DisassemblyHelper.h"
-#include "../socket/client_singleton.h"
+#include "../mem/IMemService.h"
 #include "../gui/Gui.h"
 
 namespace {
@@ -149,10 +149,17 @@ int LuaAPI_Assembly::Patch(lua_State* L) {
 
     // 转换为 unsigned char vector
     std::vector<unsigned char> data(result.bytes.begin(), result.bytes.end());
-    bool writeOk = WriteProcessMemoryBytes(address,
-        static_cast<uint32_t>(data.size()), data);
-
-    lua_pushboolean(L, writeOk ? 1 : 0);
+    Mem::MemoryWriteRequest request;
+    request.address = address;
+    request.bytes = std::move(data);
+    auto& service = LuaAPI::Service(L);
+    auto write = service.writeMemory(
+        LuaAPI::GetOperationContext(L, true), request);
+    lua_pushboolean(L, write.ok() ? 1 : 0);
+    if (!write.ok()) {
+        lua_pushstring(L, write.error().message.c_str());
+        return 2;
+    }
     return 1;
 }
 
@@ -181,11 +188,15 @@ int LuaAPI_Assembly::Disassemble(lua_State* L) {
         maxInstructions = checkOptionalCount(
             L, 3, 0, kMaxLuaDisassemblyInstructions, "max instructions");
 
-        std::vector<unsigned char> buffer(size);
-        if (!ReadProcessMemoryBytes(address, static_cast<uint32_t>(size), buffer)) {
-            LuaAPI::PushError(L, "读取进程内存失败");
+        auto& service = LuaAPI::Service(L);
+        auto read = service.readMemory(
+            LuaAPI::GetOperationContext(L, true),
+            Mem::MemoryReadRequest{address, static_cast<uint32_t>(size)});
+        if (!read.ok()) {
+            LuaAPI::PushError(L, read.error().message);
             return 2;
         }
+        std::vector<unsigned char> buffer = std::move(read.value().bytes);
         codeBytes.assign(buffer.begin(), buffer.end());
     }
 

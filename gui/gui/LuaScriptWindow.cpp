@@ -7,7 +7,8 @@
 #include <fstream>
 #include <cfloat>
 
-LuaScriptWindow::LuaScriptWindow() {
+LuaScriptWindow::LuaScriptWindow(Mem::IMemService& service)
+    : service_(service) {
     name = "Lua脚本管理器";
     refreshScriptList();
 }
@@ -497,7 +498,7 @@ void LuaScriptWindow::executeScript(const std::string& filepath) {
 
     auto& engine = LuaEngine::GetInstance();
     if (!engine.IsInitialized()) {
-        if (!engine.Initialize()) {
+        if (!engine.Initialize(service_)) {
             outputLog.push_back("[错误] Lua引擎初始化失败: " + engine.GetLastError());
             if (outputLog.size() > MAX_LOG_LINES) {
                 outputLog.erase(outputLog.begin());

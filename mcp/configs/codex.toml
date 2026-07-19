@@ -1,6 +1,6 @@
 # Codex CLI — 合并到 ~/.codex/config.toml
 # Codex 只支持全局配置，不支持项目级 MCP 配置
-# Codex 启动 amem-mcp 用 MCP over stdio；amem-mcp 默认业务路径走 HTTP JSON 访问 AMem GUI IPC Server。
+# Codex 启动 amem-mcp 用 MCP over stdio；默认业务路径走 HTTP JSON 访问 MiniMem GUI IPC Server。
 # 推荐: 在 mcp 目录执行 pip install -e .，然后将 command 改为 "amem-mcp"，并删除 args/PYTHONPATH。
 # 如果未安装包，PYTHONPATH 必须指向当前系统中的 mcp 目录：
 #   Windows: D:/AndroidMEM/AndroidMiniMem/mcp

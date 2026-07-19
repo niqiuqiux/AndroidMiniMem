@@ -4,10 +4,11 @@
 #include <vector>
 #include <string>
 #include <filesystem>
+namespace Mem { class IMemService; }
 
 class LuaScriptWindow : public Window {
 public:
-    LuaScriptWindow();
+    explicit LuaScriptWindow(Mem::IMemService& service);
     ~LuaScriptWindow();
 
     void onDraw() override;
@@ -50,5 +51,6 @@ private:
     char browserDirectoryBuf[260] = "./scripts";
     std::vector<std::filesystem::path> browserLuaFiles;
     int browserSelectedIndex = -1;
+    Mem::IMemService& service_;
 };
 

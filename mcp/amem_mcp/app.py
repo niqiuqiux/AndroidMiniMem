@@ -1,4 +1,4 @@
-"""AMem MCP Server 装配 + CLI 入口。"""
+"""MiniMem MCP Server 装配与 CLI 入口。"""
 
 from __future__ import annotations
 
@@ -44,11 +44,11 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--ipc-host", default=os.environ.get("AMEM_IPC_HOST", DEFAULT_HOST),
-        help=f"AMem GUI IPC Server 地址 (默认 {DEFAULT_HOST})",
+        help=f"MiniMem GUI IPC Server 地址 (默认 {DEFAULT_HOST})",
     )
     parser.add_argument(
         "--ipc-port", type=int, default=int(os.environ.get("AMEM_IPC_PORT", DEFAULT_PORT)),
-        help=f"AMem GUI IPC Server 端口 (默认 {DEFAULT_PORT})",
+        help=f"MiniMem GUI IPC Server 端口 (默认 {DEFAULT_PORT})",
     )
     parser.add_argument(
         "--transport", choices=["stdio"], default="stdio",

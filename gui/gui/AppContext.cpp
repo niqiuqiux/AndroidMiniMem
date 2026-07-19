@@ -1,253 +1,296 @@
 #include "AppContext.h"
-#include "Gui.h"
-#include "../socket/client_singleton.h"
+
 #include "../imgui/imgui.h"
+#include "../mem/IMemService.h"
+
 #include <algorithm>
+#include <cstdio>
+#include <limits>
 
-void AppContext::cleanupCurrentProcessServices() {
-    if (!hasProcess()) {
+AppContext::TargetMutation::TargetMutation(
+    AppContext& owner,
+    std::unique_lock<std::mutex> stateLock,
+    Mem::TargetSnapshot previousTarget)
+    : owner_(&owner),
+      stateLock_(std::move(stateLock)),
+      previousTarget_(previousTarget) {}
+
+AppContext::TargetMutation::TargetMutation(TargetMutation&& other) noexcept
+    : owner_(other.owner_),
+      stateLock_(std::move(other.stateLock_)),
+      previousTarget_(other.previousTarget_) {
+    other.owner_ = nullptr;
+}
+
+AppContext::TargetMutation::~TargetMutation() {
+    finish();
+}
+
+void AppContext::TargetMutation::publish(
+    int pid, int handle, const std::string& name) {
+    if (!owner_) {
         return;
     }
-
-    const int handle = processHandle.load(std::memory_order_relaxed);
-    ClearTrackedKernelBreakpoints(PORT_MAIN);
-    CloseProcessHandle(handle, PORT_MAIN);
-}
-
-void AppContext::selectProcess(int pid, const std::string& name) {
-    const bool hadProcess = hasProcess();
-    if (hadProcess) {
-        processRevision.fetch_add(1, std::memory_order_release);
-    }
-
-    cleanupCurrentProcessServices();
-    selectedPid.store(0, std::memory_order_relaxed);
-    processHandle.store(0, std::memory_order_relaxed);
-    int handle = 0;
-    if (OpenProcessHandle(pid, handle)) {
-        SetCurrentPid(pid);
-        processHandle.store(handle, std::memory_order_relaxed);
-        {
-            std::lock_guard<std::mutex> lock(nameMutex_);
-            selectedName_ = name;
-        }
-        Gui::log("进程已打开，句柄=%d", handle);
-    } else {
-        SetCurrentPid(0);
-        processHandle.store(0, std::memory_order_relaxed);
-        {
-            std::lock_guard<std::mutex> lock(nameMutex_);
-            selectedName_.clear();
-        }
-        Gui::log("无法打开进程句柄 %d", pid);
-    }
-
-    moduleCache.invalidate();
-    if (!hadProcess) {
-        processRevision.fetch_add(1, std::memory_order_release);
-    }
-}
-
-void AppContext::clearProcess() {
-    const bool hadProcess = hasProcess();
-    if (hadProcess) {
-        processRevision.fetch_add(1, std::memory_order_release);
-    }
-
-    cleanupCurrentProcessServices();
-    selectedPid.store(0, std::memory_order_relaxed);
-    processHandle.store(0, std::memory_order_relaxed);
+    owner_->selectedPid.store(pid, std::memory_order_relaxed);
+    owner_->processHandle.store(handle, std::memory_order_relaxed);
     {
-        std::lock_guard<std::mutex> lock(nameMutex_);
-        selectedName_.clear();
+        std::lock_guard<std::mutex> lock(owner_->nameMutex_);
+        owner_->selectedName_ = name;
     }
-    moduleCache.invalidate();
-    if (!hadProcess) {
-        processRevision.fetch_add(1, std::memory_order_release);
-    }
+    owner_->moduleCache.invalidate();
 }
 
-void AppContext::ModuleCache::refresh() {
-    std::lock_guard<std::mutex> lock(mutex);
+void AppContext::TargetMutation::clear() {
+    publish(0, 0, {});
+}
 
-    // 节流：如果缓存有效且距上次刷新不足 MIN_REFRESH_INTERVAL 秒，跳过
-    double now = ImGui::GetTime();
-    if (valid && (now - lastRefreshTime) < MIN_REFRESH_INTERVAL) {
+void AppContext::TargetMutation::finish() {
+    if (!owner_) {
         return;
     }
+    owner_->processRevision.fetch_add(1, std::memory_order_release);
+    owner_ = nullptr;
+}
 
-    std::vector<ModuleInfoItem> newList;
-    if (FetchModuleList(newList)) {
-        modules = std::move(newList);
-        symbolCacheByModuleBase.clear();
-        valid = true;
-        lastRefreshTime = now;
+std::optional<AppContext::TargetMutation> AppContext::beginTargetMutation(
+    const std::optional<Mem::TargetSnapshot>& expected,
+    uint64_t connectionGeneration) {
+    std::unique_lock<std::mutex> stateLock(processStateMutex_);
+    const uint64_t revision =
+        processRevision.load(std::memory_order_acquire);
+    if ((revision & 1u) != 0u) {
+        return std::nullopt;
+    }
+
+    Mem::TargetSnapshot current;
+    current.pid = selectedPid.load(std::memory_order_relaxed);
+    current.processHandle = processHandle.load(std::memory_order_relaxed);
+    current.processRevision = revision;
+    current.connectionGeneration = connectionGeneration;
+    if (expected && current != *expected) {
+        return std::nullopt;
+    }
+
+    processRevision.fetch_add(1, std::memory_order_acq_rel);
+    return TargetMutation(*this, std::move(stateLock), current);
+}
+
+void AppContext::clearProcessForDisconnect() {
+    auto mutation = beginTargetMutation(std::nullopt, 0);
+    if (mutation) {
+        mutation->clear();
     }
 }
 
-ModuleInfoItem AppContext::ModuleCache::findByAddress(uint64_t addr) {
-    std::lock_guard<std::mutex> lock(mutex);
-    for (const auto& m : modules) {
-        if (m.size <= 0) {
-            continue;
-        }
-        const uint64_t moduleSize = static_cast<uint64_t>(m.size);
-        if (m.base > UINT64_MAX - moduleSize) {
-            continue;
-        }
-        if (addr >= m.base && addr < m.base + moduleSize) {
-            return m;  // 返回拷贝
+Mem::TargetSnapshot AppContext::snapshotTarget(
+    uint64_t connectionGeneration) const {
+    std::lock_guard<std::mutex> stateLock(processStateMutex_);
+    Mem::TargetSnapshot snapshot;
+    snapshot.pid = selectedPid.load(std::memory_order_relaxed);
+    snapshot.processHandle = processHandle.load(std::memory_order_relaxed);
+    snapshot.processRevision = processRevision.load(std::memory_order_acquire);
+    snapshot.connectionGeneration = connectionGeneration;
+    return snapshot;
+}
+
+bool AppContext::matchesStableTarget(
+    const Mem::TargetSnapshot& expected,
+    uint64_t connectionGeneration) const {
+    if (expected.connectionGeneration != connectionGeneration) {
+        return false;
+    }
+    const uint64_t revisionBefore =
+        processRevision.load(std::memory_order_acquire);
+    if ((revisionBefore & 1u) != 0u ||
+        revisionBefore != expected.processRevision) {
+        return false;
+    }
+    const int pid = selectedPid.load(std::memory_order_relaxed);
+    const int handle = processHandle.load(std::memory_order_relaxed);
+    const uint64_t revisionAfter =
+        processRevision.load(std::memory_order_acquire);
+    return revisionBefore == revisionAfter &&
+           (revisionAfter & 1u) == 0u &&
+           pid == expected.pid &&
+           handle == expected.processHandle;
+}
+
+void AppContext::ModuleCache::refresh(Mem::IMemService& service) {
+    const double now = ImGui::GetTime();
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (valid && (now - lastRefreshTime) < MIN_REFRESH_INTERVAL) {
+            return;
         }
     }
-    return ModuleInfoItem{};  // 空对象，name 为空表示未找到
+
+    const Mem::OperationContext context = service.captureContext(true);
+    if (!context.target || !context.target->isAttached()) {
+        return;
+    }
+    std::vector<Mem::ModuleInfo> loaded;
+    size_t offset = 0;
+    while (true) {
+        Mem::ModuleListRequest request;
+        request.offset = offset;
+        request.limit = Mem::kMaxModulePageSize;
+        auto response = service.listModules(context, request);
+        if (!response.ok() || response.value().target != *context.target) {
+            return;
+        }
+        auto& page = response.value();
+        loaded.insert(loaded.end(), page.items.begin(), page.items.end());
+        if (!page.nextOffset) {
+            break;
+        }
+        offset = *page.nextOffset;
+    }
+
+    const Mem::OperationContext current = service.captureContext(true);
+    if (!current.target || *current.target != *context.target) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    modules = std::move(loaded);
+    symbolCacheByModuleBase.clear();
+    valid = true;
+    lastRefreshTime = now;
+}
+
+Mem::ModuleInfo AppContext::ModuleCache::findByAddress(uint64_t addr) {
+    std::lock_guard<std::mutex> lock(mutex);
+    for (const auto& module : modules) {
+        if (module.size == 0 ||
+            module.base >
+                (std::numeric_limits<uint64_t>::max)() - module.size) {
+            continue;
+        }
+        if (addr >= module.base && addr < module.base + module.size) {
+            return module;
+        }
+    }
+    return {};
 }
 
 std::string AppContext::ModuleCache::formatWithModule(uint64_t addr) {
-    ModuleInfoItem mod = findByAddress(addr);
-    if (!mod.name.empty()) {
-        char buf[256];
-        uint64_t offset = addr - mod.base;
-        snprintf(buf, sizeof(buf), "%s+0x%llX", mod.name.c_str(), (unsigned long long)offset);
-        return buf;
+    const Mem::ModuleInfo module = findByAddress(addr);
+    char buffer[512];
+    if (!module.name.empty()) {
+        std::snprintf(buffer, sizeof(buffer), "%s+0x%llX",
+                      module.name.c_str(),
+                      static_cast<unsigned long long>(addr - module.base));
+    } else {
+        std::snprintf(buffer, sizeof(buffer), "0x%llX",
+                      static_cast<unsigned long long>(addr));
     }
-    char buf[32];
-    snprintf(buf, sizeof(buf), "0x%llX", (unsigned long long)addr);
-    return buf;
+    return buffer;
 }
 
-bool AppContext::ModuleCache::ensureSymbolListCached(const ModuleInfoItem& module, std::vector<SymbolInfoItem>& outSymbols) {
+bool AppContext::ModuleCache::ensureSymbolListCached(
+    const Mem::ModuleInfo& module,
+    Mem::IMemService& service,
+    std::vector<SymbolInfoItem>& outSymbols) {
     {
         std::lock_guard<std::mutex> lock(mutex);
-        auto it = symbolCacheByModuleBase.find(module.base);
-        if (it != symbolCacheByModuleBase.end() && it->second.valid) {
-            outSymbols = it->second.symbols;
+        const auto found = symbolCacheByModuleBase.find(module.base);
+        if (found != symbolCacheByModuleBase.end() && found->second.valid) {
+            outSymbols = found->second.symbols;
             return true;
         }
     }
 
-    int totalCount = 0;
-    if (!SymbolInit(module.base, totalCount) || totalCount <= 0) {
+    const auto response = service.loadSymbolTable(
+        service.captureContext(true), Mem::SymbolTableRequest{module.base});
+    if (!response.ok() || response.value().items.empty()) {
         return false;
     }
-
-    constexpr int kBatchSize = 256;
-    std::vector<SymbolInfoItem> loadedSymbols;
-    loadedSymbols.reserve(totalCount);
-
-    for (int offset = 0; offset < totalCount; offset += kBatchSize) {
-        int requestCount = (kBatchSize < (totalCount - offset)) ? kBatchSize : (totalCount - offset);
-        int fetchedTotalCount = totalCount;
-        std::vector<std::pair<uint64_t, std::string>> symbols;
-        if (!SymbolGetList(offset, requestCount, symbols, &fetchedTotalCount)) {
-            return false;
-        }
-
-        for (const auto& symbol : symbols) {
-            if (symbol.second.empty()) {
-                continue;
-            }
-
-            SymbolInfoItem item;
-            item.address = symbol.first;
-            item.name = symbol.second;
-            loadedSymbols.push_back(std::move(item));
+    const Mem::TargetSnapshot expectedTarget = response.value().target;
+    std::vector<SymbolInfoItem> loaded;
+    loaded.reserve(response.value().items.size());
+    for (const auto& symbol : response.value().items) {
+        if (!symbol.name.empty()) {
+            loaded.push_back(SymbolInfoItem{symbol.address, symbol.name});
         }
     }
+    std::sort(loaded.begin(), loaded.end(),
+              [](const SymbolInfoItem& lhs, const SymbolInfoItem& rhs) {
+                  return lhs.address < rhs.address;
+              });
 
-    std::sort(loadedSymbols.begin(), loadedSymbols.end(), [](const SymbolInfoItem& lhs, const SymbolInfoItem& rhs) {
-        return lhs.address < rhs.address;
-    });
-
-    {
-        std::lock_guard<std::mutex> lock(mutex);
-        auto& cacheEntry = symbolCacheByModuleBase[module.base];
-        cacheEntry.symbols = loadedSymbols;
-        cacheEntry.lastMatchedIndex = 0;
-        cacheEntry.valid = true;
-        outSymbols = cacheEntry.symbols;
+    if (!AppContext::Get().matchesStableTarget(
+            expectedTarget, expectedTarget.connectionGeneration)) {
+        return false;
     }
+    std::lock_guard<std::mutex> lock(mutex);
+    auto& entry = symbolCacheByModuleBase[module.base];
+    entry.symbols = std::move(loaded);
+    entry.lastMatchedIndex = 0;
+    entry.valid = true;
+    outSymbols = entry.symbols;
     return true;
 }
 
-bool AppContext::ModuleCache::tryFindContainingSymbol(uint64_t addr, SymbolInfoItem& outSymbol, uint64_t& outOffset) {
-    outSymbol = SymbolInfoItem{};
+bool AppContext::ModuleCache::tryFindContainingSymbol(
+    uint64_t addr,
+    Mem::IMemService& service,
+    SymbolInfoItem& outSymbol,
+    uint64_t& outOffset) {
+    outSymbol = {};
     outOffset = 0;
-
-    ModuleInfoItem mod = findByAddress(addr);
-    if (mod.name.empty() || mod.base == 0) {
+    const Mem::ModuleInfo module = findByAddress(addr);
+    if (module.name.empty()) {
         return false;
     }
-
     std::vector<SymbolInfoItem> symbols;
-    if (!ensureSymbolListCached(mod, symbols) || symbols.empty()) {
+    if (!ensureSymbolListCached(module, service, symbols) ||
+        symbols.empty()) {
         return false;
     }
-
-    {
-        std::lock_guard<std::mutex> lock(mutex);
-        auto cacheIt = symbolCacheByModuleBase.find(mod.base);
-        if (cacheIt != symbolCacheByModuleBase.end() && cacheIt->second.valid && !cacheIt->second.symbols.empty()) {
-            const auto& cachedSymbols = cacheIt->second.symbols;
-            if (cacheIt->second.lastMatchedIndex < cachedSymbols.size()) {
-                const size_t idx = cacheIt->second.lastMatchedIndex;
-                const uint64_t start = cachedSymbols[idx].address;
-                const uint64_t end = (idx + 1 < cachedSymbols.size()) ? cachedSymbols[idx + 1].address : UINT64_MAX;
-                if (addr >= start && addr < end) {
-                    outSymbol.address = cachedSymbols[idx].address;
-                    outSymbol.name = cachedSymbols[idx].name;
-                    outOffset = addr - cachedSymbols[idx].address;
-                    return true;
-                }
-            }
-        }
-    }
-
-    auto it = std::upper_bound(symbols.begin(), symbols.end(), addr,
-        [](uint64_t target, const SymbolInfoItem& symbol) {
-            return target < symbol.address;
+    const auto upper = std::upper_bound(
+        symbols.begin(), symbols.end(), addr,
+        [](uint64_t value, const SymbolInfoItem& symbol) {
+            return value < symbol.address;
         });
-
-    if (it == symbols.begin()) {
+    if (upper == symbols.begin()) {
         return false;
     }
-
-    --it;
-    const size_t matchedIndex = static_cast<size_t>(std::distance(symbols.begin(), it));
-    outSymbol.address = it->address;
-    outSymbol.name = it->name;
-    outOffset = addr - it->address;
-
+    const auto found = std::prev(upper);
+    outSymbol = *found;
+    outOffset = addr - found->address;
     {
         std::lock_guard<std::mutex> lock(mutex);
-        auto cacheIt = symbolCacheByModuleBase.find(mod.base);
-        if (cacheIt != symbolCacheByModuleBase.end() && cacheIt->second.valid) {
-            cacheIt->second.lastMatchedIndex = matchedIndex;
+        auto entry = symbolCacheByModuleBase.find(module.base);
+        if (entry != symbolCacheByModuleBase.end()) {
+            entry->second.lastMatchedIndex =
+                static_cast<size_t>(std::distance(symbols.begin(), found));
         }
     }
     return true;
 }
 
-std::string AppContext::ModuleCache::formatWithSymbol(uint64_t addr) {
+std::string AppContext::ModuleCache::formatWithSymbol(
+    uint64_t addr, Mem::IMemService& service) {
     SymbolInfoItem symbol;
-    uint64_t symbolOffset = 0;
-    if (!tryFindContainingSymbol(addr, symbol, symbolOffset)) {
-        return "";
+    uint64_t offset = 0;
+    if (!tryFindContainingSymbol(addr, service, symbol, offset)) {
+        return {};
     }
-
-    char buf[512];
-    if (symbolOffset == 0) {
-        snprintf(buf, sizeof(buf), "%s", symbol.name.c_str());
-    } else {
-        snprintf(buf, sizeof(buf), "%s+0x%llX", symbol.name.c_str(), (unsigned long long)symbolOffset);
+    if (offset == 0) {
+        return symbol.name;
     }
-    return buf;
+    char buffer[512];
+    std::snprintf(buffer, sizeof(buffer), "%s+0x%llX",
+                  symbol.name.c_str(),
+                  static_cast<unsigned long long>(offset));
+    return buffer;
 }
 
-std::string AppContext::ModuleCache::formatAddressWithModuleAndSymbol(uint64_t addr) {
-    std::string moduleText = formatWithModule(addr);
-    std::string symbolText = formatWithSymbol(addr);
-    if (symbolText.empty()) {
-        return moduleText;
+std::string AppContext::ModuleCache::formatAddressWithModuleAndSymbol(
+    uint64_t addr, Mem::IMemService& service) {
+    std::string module = formatWithModule(addr);
+    const std::string symbol = formatWithSymbol(addr, service);
+    if (!symbol.empty()) {
+        module += " (" + symbol + ")";
     }
-    return moduleText + " (" + symbolText + ")";
+    return module;
 }

@@ -43,78 +43,106 @@ void clearTrackedBreakpointAddresses() {
     std::lock_guard<std::mutex> lock(g_trackedBreakpointMutex);
     g_trackedBreakpointAddresses.clear();
 }
+
+template<typename SendPayload>
+BreakpointMutationIoResult mutateBreakpointTracked(
+    unsigned char command, PortType port, SendPayload&& sendPayload) {
+    BreakpointMutationIoResult result;
+    (void)SocketCommand::execute(
+        port, [&](WindowsSocketClient* client, int handle) -> bool {
+            if (!SocketCommand::sendCommandWithHandle(
+                    client, command, handle)) {
+                return false;
+            }
+            result.requestStarted = true;
+            if (!sendPayload(client))
+                return false;
+            int serverResult = 0;
+            if (!client->Receive(&serverResult, sizeof(serverResult)))
+                return false;
+            result.responseReceived = true;
+            result.applied = serverResult > 0;
+            return true;
+        });
+    return result;
+}
 } // namespace
 
-bool SetKernelBreakpoint(uint64_t address, uint32_t bpType, uint32_t bpSize, PortType port) {
+BreakpointMutationIoResult SetKernelBreakpointTracked(
+    uint64_t address, uint32_t bpType, uint32_t bpSize, PortType port) {
     if (!isValidBreakpointType(bpType) || !isValidBreakpointSize(bpSize))
-        return false;
+        return {};
 
-    const bool success = SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
-        unsigned char command = CMD_KERNEL_SETBREAKPOINT;
-        if (!SocketCommand::sendCommandWithHandle(client, command, handle))
-            return false;
-        // 合并三次 Send 为一次连续字节发送
-        unsigned char buf[sizeof(address) + sizeof(bpType) + sizeof(bpSize)];
-        memcpy(buf, &address, sizeof(address));
-        memcpy(buf + sizeof(address), &bpType, sizeof(bpType));
-        memcpy(buf + sizeof(address) + sizeof(bpType), &bpSize, sizeof(bpSize));
-        if (!client->Send(buf, sizeof(buf)))
-            return false;
-        int result = 0;
-        if (!client->Receive(&result, sizeof(result)))
-            return false;
-        return result != 0;
-    });
-    if (success) {
+    BreakpointMutationIoResult result = mutateBreakpointTracked(
+        CMD_KERNEL_SETBREAKPOINT, port,
+        [&](WindowsSocketClient* client) -> bool {
+            // 合并三次 Send 为一次连续字节发送。
+            unsigned char buf[
+                sizeof(address) + sizeof(bpType) + sizeof(bpSize)];
+            memcpy(buf, &address, sizeof(address));
+            memcpy(buf + sizeof(address), &bpType, sizeof(bpType));
+            memcpy(buf + sizeof(address) + sizeof(bpType),
+                   &bpSize, sizeof(bpSize));
+            return client->Send(buf, sizeof(buf));
+        });
+    if (result.responseReceived && result.applied)
         trackBreakpointAddress(address);
-    }
-    return success;
+    return result;
+}
+
+BreakpointMutationIoResult RemoveKernelBreakpointTracked(
+    uint64_t address, PortType port) {
+    BreakpointMutationIoResult result = mutateBreakpointTracked(
+        CMD_KERNEL_REMOVEBREAKPOINT, port,
+        [&](WindowsSocketClient* client) {
+            return client->Send(&address, sizeof(address));
+        });
+    if (result.responseReceived && result.applied)
+        untrackBreakpointAddress(address);
+    return result;
+}
+
+BreakpointMutationIoResult SuspendKernelBreakpointTracked(
+    uint64_t address, PortType port) {
+    return mutateBreakpointTracked(
+        CMD_KERNEL_SUSPENDBREAKPOINT, port,
+        [&](WindowsSocketClient* client) {
+            return client->Send(&address, sizeof(address));
+        });
+}
+
+BreakpointMutationIoResult ResumeKernelBreakpointTracked(
+    uint64_t address, PortType port) {
+    return mutateBreakpointTracked(
+        CMD_KERNEL_RESUMEBREAKPOINT, port,
+        [&](WindowsSocketClient* client) {
+            return client->Send(&address, sizeof(address));
+        });
+}
+
+bool SetKernelBreakpoint(uint64_t address, uint32_t bpType,
+                         uint32_t bpSize, PortType port) {
+    const BreakpointMutationIoResult result =
+        SetKernelBreakpointTracked(address, bpType, bpSize, port);
+    return result.responseReceived && result.applied;
 }
 
 bool RemoveKernelBreakpoint(uint64_t address, PortType port) {
-    const bool success = SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
-        unsigned char command = CMD_KERNEL_REMOVEBREAKPOINT;
-        if (!SocketCommand::sendCommandWithHandle(client, command, handle))
-            return false;
-        if (!client->Send(&address, sizeof(address)))
-            return false;
-        int result = 0;
-        if (!client->Receive(&result, sizeof(result)))
-            return false;
-        return result != 0;
-    });
-    if (success) {
-        untrackBreakpointAddress(address);
-    }
-    return success;
+    const BreakpointMutationIoResult result =
+        RemoveKernelBreakpointTracked(address, port);
+    return result.responseReceived && result.applied;
 }
 
 bool SuspendKernelBreakpoint(uint64_t address, PortType port) {
-    return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
-        unsigned char command = CMD_KERNEL_SUSPENDBREAKPOINT;
-        if (!SocketCommand::sendCommandWithHandle(client, command, handle))
-            return false;
-        if (!client->Send(&address, sizeof(address)))
-            return false;
-        int result = 0;
-        if (!client->Receive(&result, sizeof(result)))
-            return false;
-        return result != 0;
-    });
+    const BreakpointMutationIoResult result =
+        SuspendKernelBreakpointTracked(address, port);
+    return result.responseReceived && result.applied;
 }
 
 bool ResumeKernelBreakpoint(uint64_t address, PortType port) {
-    return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
-        unsigned char command = CMD_KERNEL_RESUMEBREAKPOINT;
-        if (!SocketCommand::sendCommandWithHandle(client, command, handle))
-            return false;
-        if (!client->Send(&address, sizeof(address)))
-            return false;
-        int result = 0;
-        if (!client->Receive(&result, sizeof(result)))
-            return false;
-        return result != 0;
-    });
+    const BreakpointMutationIoResult result =
+        ResumeKernelBreakpointTracked(address, port);
+    return result.responseReceived && result.applied;
 }
 
 bool ReadKernelBreakpointInfo(uint64_t address, std::vector<HW_HIT_INFO> &infos, PortType port,
@@ -137,9 +165,8 @@ bool ReadKernelBreakpointInfo(uint64_t address, std::vector<HW_HIT_INFO> &infos,
             return false;
         if (result < 0 ||
             result > kMaxBreakpointHitCount ||
-            TotalCount > static_cast<uint64_t>(kMaxBreakpointHitCount) ||
             static_cast<uint64_t>(result) > TotalCount)
-            return false;
+            return SocketCommand::rejectMalformedResponse(client);
         if (outTotalHits)
             *outTotalHits = TotalCount;
         if (result > 0) {
@@ -153,6 +180,11 @@ bool ReadKernelBreakpointInfo(uint64_t address, std::vector<HW_HIT_INFO> &infos,
 }
 
 bool ClearTrackedKernelBreakpoints(PortType port) {
+    SocketCommand::TransactionLease transaction(port);
+    if (!transaction) {
+        clearTrackedBreakpointAddresses();
+        return false;
+    }
     auto addresses = snapshotTrackedBreakpointAddresses();
     bool allRemoved = true;
     for (uint64_t address : addresses) {
@@ -162,4 +194,8 @@ bool ClearTrackedKernelBreakpoints(PortType port) {
     }
     clearTrackedBreakpointAddresses();
     return allRemoved;
+}
+
+void ResetTrackedKernelBreakpoints() {
+    clearTrackedBreakpointAddresses();
 }

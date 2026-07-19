@@ -27,6 +27,7 @@ public:
     void setString(const std::string& key, const std::string& value);
     void setInt(const std::string& key, int value);
     void setChar(const std::string& key, char value);
+    bool remove(const std::string& key);
 
 private:
     ConfigManager() = default;

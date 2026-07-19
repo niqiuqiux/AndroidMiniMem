@@ -7,8 +7,10 @@
 namespace {
 constexpr int kMaxProcessCount = 65536;
 constexpr int kMaxProcessNameSize = 64 * 1024;
+constexpr size_t kMaxProcessNameBytesTotal = 64u * 1024u * 1024u;
 constexpr int kMaxModuleCount = 65536;
 constexpr int kMaxModuleNameSize = 64 * 1024;
+constexpr size_t kMaxModuleNameBytesTotal = 64u * 1024u * 1024u;
 constexpr int kMaxDriverCardSize = 4096;
 constexpr int kMaxDriverResponseSize = 64 * 1024;
 constexpr size_t kMaxSoNameSize = 4096;
@@ -70,80 +72,97 @@ bool GetMemType(int &outType, PortType type) {
         unsigned char t = 0;
         if (!client->Receive(&t, sizeof(t)))
             return false;
+        if (t > MemType_SysHook)
+            return SocketCommand::rejectMalformedResponse(client);
         outType = t;
         return true;
     });
 }
 
-bool InitDriver(std::string &Card, std::string &resStr, PortType type) {
-    resStr.clear();
-    if (Card.empty() || Card.size() > static_cast<size_t>(kMaxDriverCardSize)) {
-        resStr = "invalid driver card length";
-        return false;
+DriverInitializationIoResult InitDriverTracked(
+    const std::string& card, PortType type) {
+    DriverInitializationIoResult result;
+    if (card.empty() ||
+        card.size() > static_cast<size_t>(kMaxDriverCardSize)) {
+        result.message = "invalid driver card length";
+        return result;
     }
 
-    int ret = 0;
-    int resStrlen = 0;
-    std::vector<char> resStrVec;
-
-    bool success = SocketCommand::executeNoHandle(type, [&](WindowsSocketClient* client) -> bool {
-        unsigned char command = CMD_INITRWDRIVER;
-        if (!client->Send(&command, sizeof(command)))
-            return false;
-        int Cardlen = static_cast<int>(Card.size());
-        if (!client->Send(&Cardlen, sizeof(Cardlen)))
-            return false;
-        if (!client->Send(Card.data(), static_cast<size_t>(Cardlen)))
-            return false;
-        if (!client->Receive(&ret, sizeof(ret)))
-            return false;
-        if (!client->Receive(&resStrlen, sizeof(resStrlen)))
-            return false;
-        if (!isValidCount(resStrlen, kMaxDriverResponseSize))
-            return false;
-        resStrVec.resize(resStrlen);
-        if (resStrlen > 0 && !client->Receive(resStrVec.data(), static_cast<size_t>(resStrlen)))
-            return false;
-        return true;
-    });
-
-    if (!success)
-        return false;
-
-    if (ret > 0) {
-        try {
-            std::string timestampStr(resStrVec.data(), resStrVec.size());
-            uint64_t timestamp_ms = 0;
-            if (!parseTimestampMs(timestampStr, timestamp_ms)) {
-                resStr = "时间戳解析失败";
-                return true;
+    int serverResult = 0;
+    int responseLength = 0;
+    std::vector<char> response;
+    (void)SocketCommand::executeNoHandle(
+        type, [&](WindowsSocketClient* client) -> bool {
+            result.requestStarted = true;
+            unsigned char command = CMD_INITRWDRIVER;
+            if (!client->Send(&command, sizeof(command)))
+                return false;
+            const int cardLength = static_cast<int>(card.size());
+            if (!client->Send(&cardLength, sizeof(cardLength)))
+                return false;
+            if (!client->Send(card.data(), static_cast<size_t>(cardLength)))
+                return false;
+            if (!client->Receive(&serverResult, sizeof(serverResult)))
+                return false;
+            if (!client->Receive(&responseLength, sizeof(responseLength)))
+                return false;
+            if (!isValidCount(responseLength, kMaxDriverResponseSize))
+                return SocketCommand::rejectMalformedResponse(client);
+            response.resize(static_cast<size_t>(responseLength));
+            if (responseLength > 0 &&
+                !client->Receive(response.data(), response.size())) {
+                return false;
             }
-            time_t timestamp = static_cast<time_t>(timestamp_ms / 1000);
-            if (timestamp > 0) {
-                std::tm timeinfo{};
+            result.responseReceived = true;
+            result.accepted = serverResult > 0;
+            return true;
+        });
+
+    if (!result.responseReceived)
+        return result;
+
+    if (!result.accepted) {
+        result.message.assign(response.begin(), response.end());
+        return result;
+    }
+
+    const std::string timestampText(response.begin(), response.end());
+    uint64_t timestampMs = 0;
+    if (!parseTimestampMs(timestampText, timestampMs)) {
+        result.message = "driver initialized; timestamp parse failed";
+        return result;
+    }
+    const time_t timestamp = static_cast<time_t>(timestampMs / 1000);
+    if (timestamp <= 0) {
+        result.message = "driver initialized; invalid timestamp";
+        return result;
+    }
+
+    std::tm timeInfo{};
 #ifdef _WIN32
-                if (localtime_s(&timeinfo, &timestamp) == 0) {
+    const bool converted = localtime_s(&timeInfo, &timestamp) == 0;
 #else
-                std::tm *local = std::localtime(&timestamp);
-                if (local != nullptr) {
-                    timeinfo = *local;
+    const std::tm* local = std::localtime(&timestamp);
+    const bool converted = local != nullptr;
+    if (converted)
+        timeInfo = *local;
 #endif
-                    char dateTime[20];
-                    std::strftime(dateTime, sizeof(dateTime), "%Y-%m-%d %H:%M:%S", &timeinfo);
-                    resStr = dateTime;
-                } else {
-                    resStr = "时间格式化失败";
-                }
-            } else {
-                resStr = "无效的时间戳";
-            }
-        } catch (const std::exception &) {
-            resStr = "时间戳解析失败";
-        }
-    } else {
-        resStr.assign(resStrVec.data(), resStrVec.size());
+    if (!converted) {
+        result.message = "driver initialized; timestamp formatting failed";
+        return result;
     }
-    return true;
+
+    char dateTime[20];
+    std::strftime(dateTime, sizeof(dateTime), "%Y-%m-%d %H:%M:%S", &timeInfo);
+    result.message = dateTime;
+    return result;
+}
+
+bool InitDriver(std::string &Card, std::string &resStr, PortType type) {
+    const DriverInitializationIoResult result =
+        InitDriverTracked(Card, type);
+    resStr = result.message;
+    return result.responseReceived;
 }
 
 bool FetchServerVersion(ServerVersionInfo &outInfo, PortType type) {
@@ -176,15 +195,19 @@ bool FetchProcessList(std::vector<ProcessInfoItem> &outList, PortType type) {
         if (!client->Receive(&len, 4))
             return false;
         if (!isValidCount(len, kMaxProcessCount))
-            return false;
+            return SocketCommand::rejectMalformedResponse(client);
         outList.clear();
         outList.reserve(static_cast<size_t>(len));
+        size_t totalNameBytes = 0;
         for (int i = 0; i < len; ++i) {
             struct { int pid; int size; } proc{};
             if (!client->Receive(&proc, sizeof(proc)))
                 return false;
-            if (!isValidCount(proc.size, kMaxProcessNameSize))
-                return false;
+            if (!isValidCount(proc.size, kMaxProcessNameSize) ||
+                totalNameBytes > kMaxProcessNameBytesTotal -
+                    static_cast<size_t>(proc.size))
+                return SocketCommand::rejectMalformedResponse(client);
+            totalNameBytes += static_cast<size_t>(proc.size);
             std::vector<char> name(proc.size);
             if (proc.size > 0 && !client->Receive(name.data(), proc.size))
                 return false;
@@ -206,17 +229,21 @@ bool FetchModuleList(std::vector<ModuleInfoItem> &outList, PortType type) {
         if (!client->Receive(&len, 4))
             return false;
         if (!isValidCount(len, kMaxModuleCount))
-            return false;
+            return SocketCommand::rejectMalformedResponse(client);
         CeModuleListEntry entry{};
         outList.clear();
         outList.reserve(static_cast<size_t>(len));
+        size_t totalNameBytes = 0;
         for (int i = 0; i < len; ++i) {
             std::memset(&entry, 0, sizeof(entry));
             if (!client->Receive(&entry, sizeof(entry)))
                 return false;
             if (!isValidModuleSize(entry.modulesize) ||
-                !isValidCount(entry.modulenamesize, kMaxModuleNameSize))
-                return false;
+                !isValidCount(entry.modulenamesize, kMaxModuleNameSize) ||
+                totalNameBytes > kMaxModuleNameBytesTotal -
+                    static_cast<size_t>(entry.modulenamesize))
+                return SocketCommand::rejectMalformedResponse(client);
+            totalNameBytes += static_cast<size_t>(entry.modulenamesize);
             std::vector<char> name;
             if (entry.modulenamesize > 0) {
                 name.resize(static_cast<size_t>(entry.modulenamesize));
@@ -238,9 +265,6 @@ bool FetchModuleList(std::vector<ModuleInfoItem> &outList, PortType type) {
 }
 
 bool GetSoBaseByName(const std::string &moduleName, uint64_t &outBase, PortType port) {
-    auto* client = GetSocketMgr().GetClient(port);
-    if (!client || !client->IsConnected())
-        return false;
     if (!isSharedObjectName(moduleName))
         return false;
 
@@ -322,6 +346,10 @@ static bool read_u64(uint64_t address, uint64_t &value, PortType port) {
 bool ResolveModuleOffsetChain(uint64_t &outAddress, const std::string &moduleName,
                               uint64_t baseOffset, const std::vector<uint64_t> &offsets,
                               bool derefFinal, PortType port) {
+    SocketCommand::TransactionLease transaction(port);
+    if (!transaction)
+        return false;
+
     uint64_t base = 0;
     if (!GetModuleBaseByName(moduleName, base, port))
         return false;

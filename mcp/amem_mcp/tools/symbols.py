@@ -31,11 +31,12 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
             module_base: 模块基址；如提供，则会先初始化该模块的符号表
         """
         offset, count = clamp_page(offset, count)
+        params = {"offset": offset, "count": count}
         if module_base:
             parse_int(module_base)
-            ipc.call_or_raise("symbol_init", {"module_base": module_base})
+            params["module_base"] = module_base
 
-        r = ipc.call_or_raise("symbol_list", {"offset": offset, "count": count})
+        r = ipc.call_or_raise("symbol_list", params)
         total = r.get("total", 0)
         symbols = r.get("symbols", [])
         off = r.get("offset", offset)

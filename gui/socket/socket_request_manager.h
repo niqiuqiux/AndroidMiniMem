@@ -9,13 +9,13 @@
 /**
  * Socket请求管理器
  * 
- * 目的：解决多个窗口（BreakpointWindow、ScanWindow、MemoryViewerWindow等）
- * 同时使用同一个Socket连接时产生的数据接收冲突问题。
+ * 目的：解决 GUI、Lua 与 IPC 等多个调用入口
+ * 同时使用同一个 Socket 连接时产生的数据接收冲突问题。
  * 
  * 问题场景：
- * - 窗口A发送CMD_READPROCESSMEMORY命令
- * - 窗口B在窗口A接收响应前发送CMD_KERNEL_READHWBPINFO命令
- * - 结果：窗口A接收到窗口B的数据，窗口B接收到窗口A的数据
+ * - 入口 A 发送 CMD_READPROCESSMEMORY 命令
+ * - 入口 B 在入口 A 接收响应前发送 CMD_KERNEL_READHWBPINFO 命令
+ * - 结果：两个入口接收到彼此的响应数据
  * 
  * 解决方案：
  * - 使用互斥锁确保每次Socket请求-响应操作是原子的

@@ -198,6 +198,7 @@ private:
     };
 
     static constexpr int kRingPages = 2;   // 数据区 2^2 = 4 页
+    static constexpr size_t kMaxPendingHits = 100000;
 
     std::mutex mMutex;                      // 保护 mEntries 及全部 SubFd 字段
     std::map<uint64_t, Entry> mEntries;
@@ -380,6 +381,9 @@ private:
                 item.regs_info.sp = regs[31];
                 item.regs_info.pc = regs[32];
                 // pstate/orig_x0/syscallno 已随 item 整体 memset 清零（perf 不提供；HW_HIT_ITEM 已无 fpsimd_info）
+                if (e.hits.size() >= kMaxPendingHits) {
+                    e.hits.pop_front();
+                }
                 e.hits.push_back(item);
                 e.totalHits++;
             } else if (hdr.type == PERF_RECORD_LOST) {

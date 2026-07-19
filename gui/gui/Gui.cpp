@@ -37,17 +37,17 @@ namespace Gui {
 		windows.emplace_back(window);
 	}
 
-	bool mainLoop()
+	bool mainLoop(Mem::IMemService& service)
 	{
 		static bool bootstrapped = false;
 		if (!bootstrapped) {
 			if (windows.empty()) {
-				Gui::addWindow(new CEWindow());
-				Gui::addWindow(new ServerConnectWindow());
+				Gui::addWindow(new CEWindow(service));
+				Gui::addWindow(new ServerConnectWindow(service));
 				Gui::addWindow(new LogWindow());
 				
 #ifdef HAVE_LUAJIT
-				Gui::addWindow(new LuaScriptWindow());
+				Gui::addWindow(new LuaScriptWindow(service));
 #endif
 			}
 			Gui::log("欢迎使用 MiniMem，请先在「服务器连接」窗口连接设备");

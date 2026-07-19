@@ -23,15 +23,18 @@ AndroidMiniMem/
                                   │ HTTP JSON
                                   ▼
               gui/ 内嵌 IpcServer (127.0.0.1:28100)
+                                  │
+                                  ▼
+              gui/mem/ IMemService（校验、目标快照、复合事务）
                                   │ 调用 socket/client_singleton.h 协议层
                                   ▼
-              gui/ WinSocketClientMgr ──(TCP)──▶ engine/ socket_server (Android 设备)
+              gui/ WinSocketClientMgr ──(TCP)──▶ engine/ mini_server (Android 设备)
                                                       │
                                                       ▼
-                                  内存读写 / 断点 / 符号（内核 or syscall）
+                    内存读写（内核 / syscall）与断点（内核 / perf）/ 符号
 ```
 
-`socket/client_singleton.h` 中的自由函数是设备协议的**单一真相源**；GUI、IPC(MCP) 三方都通过它说话。
+`socket/client_singleton.h` 中的自由函数是设备线协议的**单一真相源**；GUI、Lua、IPC(MCP) 统一依赖 `gui/mem/IMemService.h`，只有 `SystemMemService` 可以进入协议层。连接代际、目标 revision、复合事务和错误语义因此对所有入口保持一致。
 
 ## 保留 / 移除的能力
 
@@ -65,7 +68,7 @@ AndroidMiniMem/
 
 ### 1. 后端引擎 `engine/`（Android ARM64）
 
-需要 Android NDK（r27c/r28c）。产物为设备端可执行文件 `bin/socket_server`。
+需要 Android NDK（r27c/r28c）。产物为设备端可执行文件 `bin/mini_server`。
 
 ```bash
 cd engine
@@ -76,7 +79,7 @@ cmake -S . -B build -DANDROID_NDK=<ndk路径> -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-把 `socket_server`（及内核驱动 `Mem.ko`/`CFI.ko`，如使用内核模式）推送到设备并以 root 运行，监听端口（默认 52736）。
+把 `mini_server`（及内核驱动 `Mem.ko`/`CFI.ko`，如使用内核模式）推送到设备并以 root 运行，监听端口（默认 52736）。
 
 ### 2. 前端 GUI `gui/`（Windows x64）
 
@@ -86,9 +89,10 @@ cmake --build build -j
 cd gui
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
-产物 `bin/MiniMemClient.exe`，启动后自动在 `127.0.0.1:28100` 开启 IPC 服务。
+产物 `bin/MiniMemClient.exe`，启动后自动在 `127.0.0.1:28100` 开启 IPC 服务。IPC 仅接受无非空 `Origin`、具有唯一 `Content-Length` 且 `Content-Type` 为 `application/json` 的 POST 请求，不开放浏览器 CORS，也不接受 `Transfer-Encoding`。
 
 ### 3. MCP 服务 `mcp/`（Python 3.10+）
 
@@ -113,4 +117,5 @@ amem-mcp               # 启动 stdio MCP，桥接 GUI 的 IPC 服务
 
 - [engine/ceserver/cmd.md](engine/ceserver/cmd.md) — Socket 二进制协议：命令字、线格式、内存读写"连续前缀"语义
 - [docs/api_design.md](docs/api_design.md) — API 设计契约与决策：连续前缀读/写三态、批量读、返回值/错误约定、模块基址/断点/符号/指针链要点、新增 API 规范
+- [docs/amem_memservice_sync.md](docs/amem_memservice_sync.md) — AMem MemService 重构的同步范围、排除项与后续判断规则
 - 各子项目另有 `CLAUDE.md`（`engine/`、`gui/`）说明构建与架构。

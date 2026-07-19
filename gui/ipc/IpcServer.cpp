@@ -1,10 +1,9 @@
 #include "IpcServer.h"
-#include "../socket/client_singleton.h"
+#include "IpcHttpRequest.h"
+#include "../mem/IMemService.h"
 #include "../socket/socket_platform.h"
 #include "../socket/socket_io_timeout.h"
-#include "../gui/AppContext.h"
 #include "../gui/Gui.h"
-#include "../gui/MemoryTypes.h"
 
 #ifdef HAVE_LUAJIT
 #include "../lua/LuaEngine.h"
@@ -20,138 +19,22 @@
 #include <stdexcept>
 
 namespace {
-constexpr size_t kMaxHttpRequestBytes = 1024 * 1024;
 constexpr uint32_t kMaxIpcMemoryTransferBytes = 64 * 1024;
-constexpr size_t kMaxIpcBatchReadCount = 100000;
-constexpr uint64_t kMaxIpcBatchReadTotalBytes = 256ull * 1024ull * 1024ull;
+constexpr size_t kMaxIpcBatchReadCount = Mem::kMaxMemoryBatchCount;
+constexpr uint64_t kMaxIpcBatchReadTotalBytes = Mem::kMaxMemoryBatchBytes;
 constexpr int kDefaultIpcLuaTimeoutSeconds = 30;
 constexpr int kMaxIpcLuaTimeoutSeconds = 300;
+constexpr int kDefaultIpcRequestTimeoutSeconds = 30;
 constexpr size_t kMaxIpcStringParamBytes = 4096;
 constexpr size_t kMaxIpcLuaCodeBytes = 256 * 1024;
 constexpr size_t kMaxIpcOffsetChainLength = 1024;
+constexpr size_t kIpcWorkerCount = 4;
+constexpr size_t kMaxPendingIpcClients = 64;
 
 bool isBlankString(const std::string& value) {
     return std::all_of(value.begin(), value.end(), [](unsigned char ch) {
         return std::isspace(ch) != 0;
     });
-}
-
-bool equalsIgnoreCase(const std::string& text, size_t begin, size_t end, const char* expected) {
-    size_t expectedLen = 0;
-    while (expected[expectedLen] != '\0') {
-        ++expectedLen;
-    }
-    if (end < begin || end - begin != expectedLen) {
-        return false;
-    }
-
-    for (size_t i = 0; i < expectedLen; ++i) {
-        if (std::tolower(static_cast<unsigned char>(text[begin + i])) !=
-            std::tolower(static_cast<unsigned char>(expected[i]))) {
-            return false;
-        }
-    }
-    return true;
-}
-
-struct HttpRequestLine {
-    std::string method;
-    std::string target;
-};
-
-bool parseRequestLine(const std::string& headers, HttpRequestLine& out) {
-    const size_t lineEnd = headers.find("\r\n");
-    const std::string line =
-        headers.substr(0, lineEnd == std::string::npos ? headers.size() : lineEnd);
-    const size_t methodEnd = line.find(' ');
-    if (methodEnd == std::string::npos || methodEnd == 0) {
-        return false;
-    }
-
-    const size_t targetEnd = line.find(' ', methodEnd + 1);
-    if (targetEnd == std::string::npos || targetEnd == methodEnd + 1) {
-        return false;
-    }
-
-    const std::string version = line.substr(targetEnd + 1);
-    if (version.rfind("HTTP/", 0) != 0) {
-        return false;
-    }
-
-    out.method = line.substr(0, methodEnd);
-    out.target = line.substr(methodEnd + 1, targetEnd - methodEnd - 1);
-    return true;
-}
-
-std::string pathWithoutQuery(const std::string& target) {
-    const size_t query = target.find('?');
-    return query == std::string::npos ? target : target.substr(0, query);
-}
-
-bool parseContentLengthHeader(const std::string& headers,
-                              size_t& outLength,
-                              bool& outFound) {
-    outLength = 0;
-    outFound = false;
-    size_t lineStart = 0;
-    while (lineStart < headers.size()) {
-        size_t lineEnd = headers.find("\r\n", lineStart);
-        if (lineEnd == std::string::npos) {
-            lineEnd = headers.size();
-        }
-
-        const size_t colon = headers.find(':', lineStart);
-        if (colon != std::string::npos && colon < lineEnd) {
-            size_t nameBegin = lineStart;
-            size_t nameEnd = colon;
-            while (nameBegin < nameEnd &&
-                   std::isspace(static_cast<unsigned char>(headers[nameBegin]))) {
-                ++nameBegin;
-            }
-            while (nameEnd > nameBegin &&
-                   std::isspace(static_cast<unsigned char>(headers[nameEnd - 1]))) {
-                --nameEnd;
-            }
-
-            if (equalsIgnoreCase(headers, nameBegin, nameEnd, "content-length")) {
-                size_t valueBegin = colon + 1;
-                size_t valueEnd = lineEnd;
-                while (valueBegin < valueEnd &&
-                       std::isspace(static_cast<unsigned char>(headers[valueBegin]))) {
-                    ++valueBegin;
-                }
-                while (valueEnd > valueBegin &&
-                       std::isspace(static_cast<unsigned char>(headers[valueEnd - 1]))) {
-                    --valueEnd;
-                }
-                if (valueBegin == valueEnd) {
-                    return false;
-                }
-
-                size_t parsed = 0;
-                for (size_t i = valueBegin; i < valueEnd; ++i) {
-                    const unsigned char ch = static_cast<unsigned char>(headers[i]);
-                    if (!std::isdigit(ch)) {
-                        return false;
-                    }
-                    const size_t digit = static_cast<size_t>(ch - '0');
-                    if (parsed > ((std::numeric_limits<size_t>::max)() - digit) / 10) {
-                        return false;
-                    }
-                    parsed = parsed * 10 + digit;
-                }
-                outLength = parsed;
-                outFound = true;
-                return true;
-            }
-        }
-
-        if (lineEnd == headers.size()) {
-            break;
-        }
-        lineStart = lineEnd + 2;
-    }
-    return true;
 }
 
 uint32_t getPositiveSizeParam(const json& params,
@@ -320,43 +203,6 @@ uint32_t getOptionalPositiveUintParam(const json& params,
     return static_cast<uint32_t>(value);
 }
 
-uint32_t getRequiredUint32Param(const json& params, const char* key) {
-    if (!params.contains(key)) {
-        throw std::invalid_argument(std::string(key) + " is required");
-    }
-
-    uint64_t value = 0;
-    const auto& raw = params.at(key);
-    if (raw.is_number_unsigned()) {
-        value = raw.get<uint64_t>();
-    } else if (raw.is_number_integer()) {
-        const int64_t signedValue = raw.get<int64_t>();
-        if (signedValue < 0) {
-            throw std::invalid_argument(std::string(key) + " must be non-negative");
-        }
-        value = static_cast<uint64_t>(signedValue);
-    } else {
-        throw std::invalid_argument(std::string(key) + " must be an integer");
-    }
-
-    if (value > static_cast<uint64_t>((std::numeric_limits<uint32_t>::max)())) {
-        throw std::invalid_argument(std::string(key) + " out of range");
-    }
-    return static_cast<uint32_t>(value);
-}
-
-uint32_t getRequiredScanFlagsParam(const json& params) {
-    uint32_t flags = getRequiredUint32Param(params, "flags");
-    if (params.contains("scan_flag")) {
-        uint32_t scanFlag = getRequiredUint32Param(params, "scan_flag");
-        if (scanFlag != flags) {
-            throw std::invalid_argument(
-                "flags and scan_flag must match when both are provided");
-        }
-    }
-    return flags;
-}
-
 bool getOptionalBoolParam(const json& params, const char* key, bool defaultValue) {
     if (!params.contains(key)) {
         return defaultValue;
@@ -371,6 +217,25 @@ bool getOptionalBoolParam(const json& params, const char* key, bool defaultValue
 bool isValidBreakpointSize(uint32_t size) {
     return size == 1 || size == 2 || size == 4 || size == 8;
 }
+
+json serviceFailure(const Mem::Error& error) {
+    json response = {
+        {"success", false},
+        {"error", error.message},
+        {"error_code", Mem::errorCodeName(error.code)},
+        {"retryable", error.retryable}
+    };
+    if (error.affectedBytes) {
+        response["result"] = {{"written", *error.affectedBytes}};
+    }
+    return response;
+}
+
+std::string formatAddress(uint64_t address) {
+    std::ostringstream output;
+    output << "0x" << std::hex << address;
+    return output.str();
+}
 } // namespace
 
 // ── 单例 ─────────────────────────────────────────────────────────
@@ -380,9 +245,10 @@ IpcServer& IpcServer::GetInstance() {
 }
 
 // ── 启动/停止 ────────────────────────────────────────────────────
-bool IpcServer::Start(uint16_t port) {
+bool IpcServer::Start(Mem::IMemService& service, uint16_t port) {
     if (running_.load()) return true;
 
+    service_ = &service;
     port_ = port;
     RegisterBuiltinMethods();
 
@@ -422,6 +288,15 @@ bool IpcServer::Start(uint16_t port) {
     }
 
     running_.store(true);
+    {
+        std::lock_guard<std::mutex> lock(clientQueueMutex_);
+        stopClientWorkers_ = false;
+        clientQueue_.clear();
+    }
+    clientThreads_.reserve(kIpcWorkerCount);
+    for (size_t i = 0; i < kIpcWorkerCount; ++i) {
+        clientThreads_.emplace_back(&IpcServer::ClientWorker, this);
+    }
     serverThread_ = std::thread(&IpcServer::ServerThread, this);
     Gui::log("[IPC] 服务已启动，监听端口 %d", (int)port_);
     return true;
@@ -436,6 +311,23 @@ void IpcServer::Stop() {
 
     if (serverThread_.joinable())
         serverThread_.join();
+
+    std::deque<uintptr_t> pendingClients;
+    {
+        std::lock_guard<std::mutex> lock(clientQueueMutex_);
+        stopClientWorkers_ = true;
+        pendingClients.swap(clientQueue_);
+    }
+    for (uintptr_t client : pendingClients) {
+        SocketPlatform::Close(static_cast<SOCKET>(client));
+    }
+    clientQueueCv_.notify_all();
+    for (auto& worker : clientThreads_) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+    clientThreads_.clear();
 
     SocketPlatform::Cleanup();
 }
@@ -477,10 +369,38 @@ void IpcServer::ServerThread() {
             break;
         }
 
-        // 每个请求在独立线程处理（短连接）
-        std::thread([this, client]() {
-            HandleClient((uintptr_t)client);
-        }).detach();
+        bool queued = false;
+        {
+            std::lock_guard<std::mutex> lock(clientQueueMutex_);
+            if (!stopClientWorkers_ &&
+                clientQueue_.size() < kMaxPendingIpcClients) {
+                clientQueue_.push_back(static_cast<uintptr_t>(client));
+                queued = true;
+            }
+        }
+        if (queued) {
+            clientQueueCv_.notify_one();
+        } else {
+            SocketPlatform::Close(client);
+        }
+    }
+}
+
+void IpcServer::ClientWorker() {
+    while (true) {
+        uintptr_t client = static_cast<uintptr_t>(INVALID_SOCKET);
+        {
+            std::unique_lock<std::mutex> lock(clientQueueMutex_);
+            clientQueueCv_.wait(lock, [&] {
+                return stopClientWorkers_ || !clientQueue_.empty();
+            });
+            if (stopClientWorkers_ && clientQueue_.empty()) {
+                return;
+            }
+            client = clientQueue_.front();
+            clientQueue_.pop_front();
+        }
+        HandleClient(client);
     }
 }
 
@@ -500,11 +420,9 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
     char buf[4096];
     size_t contentLength = 0;
     bool contentLengthKnown = false;
-    bool badRequest = false;
     bool requestTooLarge = false;
     int earlyStatusCode = 0;
     std::string earlyError;
-    HttpRequestLine requestLine;
     size_t headerEnd = std::string::npos;
 
     while (true) {
@@ -517,45 +435,15 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
             headerEnd = raw.find("\r\n\r\n");
             if (headerEnd != std::string::npos) {
                 const std::string headers = raw.substr(0, headerEnd);
-                if (!parseRequestLine(headers, requestLine)) {
-                    badRequest = true;
-                    earlyError = "Invalid HTTP request line";
+                const IpcHttp::ValidationResult validation =
+                    IpcHttp::ValidateRequestHead(headers);
+                if (!validation.accepted()) {
+                    earlyStatusCode = validation.statusCode;
+                    earlyError = validation.error;
                     break;
                 }
-
-                const std::string path = pathWithoutQuery(requestLine.target);
-                if (path != "/") {
-                    earlyStatusCode = 404;
-                    earlyError = "Unknown IPC endpoint";
-                    break;
-                }
-
-                if (requestLine.method != "POST" &&
-                    requestLine.method != "OPTIONS") {
-                    earlyStatusCode = 405;
-                    earlyError = "Unsupported HTTP method";
-                    break;
-                }
-
-                if (!parseContentLengthHeader(headers,
-                                              contentLength,
-                                              contentLengthKnown)) {
-                    badRequest = true;
-                    earlyError = "Invalid Content-Length";
-                    break;
-                }
-
-                if (requestLine.method == "POST" && !contentLengthKnown) {
-                    badRequest = true;
-                    earlyError = "Missing Content-Length";
-                    break;
-                }
-
-                if (contentLength > kMaxHttpRequestBytes ||
-                    headerEnd + 4 > kMaxHttpRequestBytes - contentLength) {
-                    requestTooLarge = true;
-                    break;
-                }
+                contentLength = validation.request.contentLength;
+                contentLengthKnown = true;
             }
         }
 
@@ -564,13 +452,7 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
             if (raw.size() >= bodyStart && raw.size() - bodyStart >= contentLength) break;
         }
 
-        if (headerEnd != std::string::npos &&
-            requestLine.method == "OPTIONS" &&
-            !contentLengthKnown) {
-            break;
-        }
-
-        if (raw.size() > kMaxHttpRequestBytes) {
+        if (raw.size() > IpcHttp::kMaxRequestBytes) {
             requestTooLarge = true;
             break;
         }
@@ -583,7 +465,7 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
         return;
     }
 
-    if (badRequest || headerEnd == std::string::npos) {
+    if (headerEnd == std::string::npos) {
         json response = {{"success", false},
                          {"error", earlyError.empty() ? "Invalid HTTP request"
                                                        : earlyError}};
@@ -614,22 +496,13 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
     if (contentLengthKnown && raw.size() >= bodyStart)
         body = raw.substr(bodyStart, contentLength);
 
-    // 处理 CORS preflight
-    if (requestLine.method == "OPTIONS") {
-        std::string resp = "HTTP/1.1 204 No Content\r\n"
-            "Access-Control-Allow-Origin: *\r\n"
-            "Access-Control-Allow-Methods: POST, OPTIONS\r\n"
-            "Access-Control-Allow-Headers: Content-Type\r\n"
-            "Content-Length: 0\r\n\r\n";
-        ::send(sock, resp.c_str(), (int)resp.size(), 0);
-        return;
-    }
-
     // 解析 JSON 并分发
     json response;
     int statusCode = 200;
     try {
         json request = json::parse(body);
+        SocketIoTimeout::ScopedTimeout requestTimeout(
+            kDefaultIpcRequestTimeoutSeconds);
         response = DispatchRequest(request);
     } catch (const json::parse_error& e) {
         statusCode = 400;
@@ -649,11 +522,12 @@ std::string IpcServer::BuildHttpResponse(int statusCode, const std::string& body
     const char* reason = "OK";
     switch (statusCode) {
     case 200: reason = "OK"; break;
-    case 204: reason = "No Content"; break;
     case 400: reason = "Bad Request"; break;
+    case 403: reason = "Forbidden"; break;
     case 404: reason = "Not Found"; break;
     case 405: reason = "Method Not Allowed"; break;
     case 413: reason = "Payload Too Large"; break;
+    case 415: reason = "Unsupported Media Type"; break;
     case 500: reason = "Internal Server Error"; break;
     default:  reason = "Unknown"; break;
     }
@@ -661,7 +535,7 @@ std::string IpcServer::BuildHttpResponse(int statusCode, const std::string& body
     std::ostringstream oss;
     oss << "HTTP/1.1 " << statusCode << " " << reason << "\r\n"
         << "Content-Type: application/json; charset=utf-8\r\n"
-        << "Access-Control-Allow-Origin: *\r\n"
+        << "X-Content-Type-Options: nosniff\r\n"
         << "Content-Length: " << body.size() << "\r\n"
         << "Connection: close\r\n"
         << "\r\n"
@@ -747,17 +621,6 @@ static std::vector<unsigned char> HexToBytes(const std::string& hex) {
 }
 
 
-// 断点操作失败时的错误信息。硬件断点支持两种后端——内核驱动（init_driver 切内核模式）
-// 与用户态 perf_event_open（默认 syscall 模式即可，无需内核驱动）——故不再假设
-// “必须内核模式”，改为列出中性的常见失败原因供排查（避免把 perf 后端的失败误导到内核模式）。
-static json breakpointFailure(const char* genericMsg) {
-    return {{"success", false},
-            {"error", std::string(genericMsg) +
-                      "（硬件断点支持内核驱动 / 用户态 perf 两种后端，均需 root；"
-                      "常见原因：未 root、perf_event_paranoid 过高、"
-                      "地址无效或未按监控长度对齐、硬件断点槽位耗尽、目标线程已退出）"}};
-}
-
 static uint64_t ParseAddress(const json& params, const std::string& key) {
     auto& v = params.at(key);
     if (v.is_string()) {
@@ -795,131 +658,149 @@ static uint64_t ParseAddress(const json& params, const std::string& key) {
 void IpcServer::RegisterBuiltinMethods() {
 
     // ── get_status ───────────────────────────────────────────────
-    RegisterMethod("get_status", [](const json&) -> json {
-        auto& ctx = AppContext::Get();
-        bool connected = IsMultiPortConnected();
+    RegisterMethod("get_status", [this](const json&) -> json {
+        auto status = service_->status(service_->captureContext(false));
+        if (!status.ok()) {
+            return serviceFailure(status.error());
+        }
+        const auto& value = status.value();
         return {
             {"success", true},
             {"result", {
-                {"connected", connected},
-                {"pid", ctx.selectedPid.load()},
-                {"process_name", ctx.getSelectedName()},
-                {"handle", ctx.processHandle.load()}
+                {"connected", value.connection.connected},
+                {"connection_poisoned", value.connection.poisoned},
+                {"connection_generation", value.connection.generation},
+                {"pid", value.target.pid},
+                {"process_name", value.processName},
+                {"handle", value.target.processHandle},
+                {"process_revision", value.target.processRevision}
             }}
         };
     });
 
     // ── get_version ──────────────────────────────────────────────
-    RegisterMethod("get_version", [](const json&) -> json {
-        ServerVersionInfo info;
-        if (!FetchServerVersion(info))
-            return {{"success", false}, {"error", "获取版本失败"}};
+    RegisterMethod("get_version", [this](const json&) -> json {
+        auto info = service_->serverVersion(service_->captureContext(false));
+        if (!info.ok())
+            return serviceFailure(info.error());
         return {{"success", true}, {"result", {
-            {"version", info.version},
-            {"version_string", info.versionString}
+            {"version", info.value().version},
+            {"version_string", info.value().versionString}
         }}};
     });
 
     // ── get_architecture ─────────────────────────────────────────
-    RegisterMethod("get_architecture", [](const json&) -> json {
-        int type = 0;
-        if (!GetMemType(type))
-            return {{"success", false}, {"error", "获取架构失败"}};
-        const char* names[] = {"Null", "IO", "Syscall", "Kernel", "SysHook"};
-        std::string name = (type >= 0 && type <= 4) ? names[type] : "Unknown";
-        return {{"success", true}, {"result", {{"type", type}, {"name", name}}}};
+    RegisterMethod("get_architecture", [this](const json&) -> json {
+        auto type = service_->memoryType(service_->captureContext(false));
+        if (!type.ok())
+            return serviceFailure(type.error());
+        return {{"success", true}, {"result", {
+            {"type", type.value().type}, {"name", type.value().name}}}};
     });
 
     // ── init_driver ──────────────────────────────────────────────
-    RegisterMethod("init_driver", [](const json& p) -> json {
+    RegisterMethod("init_driver", [this](const json& p) -> json {
         std::string card = getStringParam(
             p, "card", "", true, false, kMaxIpcStringParamBytes);
-        std::string resStr;
-        if (!InitDriver(card, resStr))
-            return {{"success", false}, {"error", "初始化驱动失败: " + resStr}};
-        return {{"success", true}, {"result", {{"message", resStr}}}};
+        auto result = service_->initializeDriver(
+            service_->captureContext(false),
+            Mem::DriverInitializeRequest{card});
+        if (!result.ok())
+            return serviceFailure(result.error());
+        return {{"success", true}, {"result", {
+            {"message", result.value().message}}}};
     });
 
     // ── list_processes ───────────────────────────────────────────
-    RegisterMethod("list_processes", [](const json&) -> json {
-        std::vector<ProcessInfoItem> list;
-        if (!FetchProcessList(list))
-            return {{"success", false}, {"error", "获取进程列表失败"}};
+    RegisterMethod("list_processes", [this](const json&) -> json {
+        const Mem::OperationContext context = service_->captureContext(false);
+        std::vector<Mem::ProcessInfo> list;
+        size_t offset = 0;
+        while (true) {
+            Mem::ProcessListRequest request;
+            request.offset = offset;
+            request.limit = Mem::kMaxProcessPageSize;
+            auto result = service_->listProcesses(context, request);
+            if (!result.ok())
+                return serviceFailure(result.error());
+            auto& page = result.value();
+            list.insert(list.end(), page.items.begin(), page.items.end());
+            if (!page.nextOffset)
+                break;
+            offset = *page.nextOffset;
+        }
         json arr = json::array();
         for (auto& p : list)
             arr.push_back({{"pid", p.pid}, {"name", p.name}});
         return {{"success", true}, {"result", arr}};
     });
     // ── open_process ──────────────────────────────────────────────
-    RegisterMethod("open_process", [](const json& p) -> json {
+    RegisterMethod("open_process", [this](const json& p) -> json {
         int pid = getRequiredPositiveIntParam(p, "pid");
-        AppContext::Get().selectProcess(pid, "");
-        int handle = AppContext::Get().processHandle.load(std::memory_order_relaxed);
-        if (handle == 0)
-            return {{"success", false}, {"error", "打开进程失败"}};
-        return {{"success", true}, {"result", {{"handle", handle}}}};
+        auto result = service_->openProcess(
+            service_->captureContext(true), Mem::OpenProcessRequest{pid, {}});
+        if (!result.ok())
+            return serviceFailure(result.error());
+        return {{"success", true}, {"result", {
+            {"handle", result.value().target.processHandle},
+            {"pid", result.value().target.pid},
+            {"process_name", result.value().name},
+            {"process_revision", result.value().target.processRevision},
+            {"connection_generation",
+             result.value().target.connectionGeneration}
+        }}};
     });
 
     // ── list_modules ─────────────────────────────────────────────
-    RegisterMethod("list_modules", [](const json& p) -> json {
-        std::vector<ModuleInfoItem> list;
-        if (!FetchModuleList(list))
-            return {{"success", false}, {"error", "获取模块列表失败"}};
-
-        // 可选：名称过滤（大小写不敏感子串匹配）
+    RegisterMethod("list_modules", [this](const json& p) -> json {
         std::string filter = getStringParam(
             p, "filter", "", false, true, kMaxIpcStringParamBytes);
-        std::vector<ModuleInfoItem*> filtered;
-        if (!filter.empty()) {
-            std::string lowerFilter = filter;
-            std::transform(lowerFilter.begin(), lowerFilter.end(), lowerFilter.begin(),
-                [](unsigned char c) { return (char)std::tolower(c); });
-            for (auto& m : list) {
-                std::string lowerName = m.name;
-                std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
-                    [](unsigned char c) { return (char)std::tolower(c); });
-                if (lowerName.find(lowerFilter) != std::string::npos)
-                    filtered.push_back(&m);
-            }
-        } else {
-            for (auto& m : list) filtered.push_back(&m);
-        }
-
-        int total = (int)filtered.size();
-        int offset = getClampedIntParam(p, "offset", 0, 0, total);
+        int offset = getClampedIntParam(
+            p, "offset", 0, 0, (std::numeric_limits<int>::max)());
         int count = getClampedIntParam(p, "count", 200, 1, 1000);
-        int end = (std::min)(offset + count, total);
+        Mem::ModuleListRequest request;
+        request.filter = filter;
+        request.offset = static_cast<size_t>(offset);
+        request.limit = static_cast<size_t>(count);
+        auto result = service_->listModules(
+            service_->captureContext(true), request);
+        if (!result.ok())
+            return serviceFailure(result.error());
 
         json arr = json::array();
-        for (int i = offset; i < end; i++) {
-            auto* m = filtered[i];
-            std::ostringstream baseStr;
-            baseStr << "0x" << std::hex << m->base;
+        for (const auto& module : result.value().items) {
             arr.push_back({
-                {"base", baseStr.str()}, {"size", m->size},
-                {"type", m->type}, {"flag", m->flag}, {"name", m->name}
+                {"base", formatAddress(module.base)}, {"size", module.size},
+                {"type", module.type}, {"flag", module.flag},
+                {"name", module.name}
             });
         }
-        return {{"success", true}, {"result", {{"total", total}, {"offset", offset}, {"modules", arr}}}};
+        return {{"success", true}, {"result", {
+            {"total", result.value().total},
+            {"offset", result.value().offset}, {"modules", arr}
+        }}};
     });
 
     // ── read_memory ──────────────────────────────────────────────
-    RegisterMethod("read_memory", [](const json& p) -> json {
+    RegisterMethod("read_memory", [this](const json& p) -> json {
         uint64_t addr = ParseAddress(p, "address");
         uint32_t size = getPositiveSizeParam(p, "size", 256u, kMaxIpcMemoryTransferBytes);
-        std::vector<unsigned char> data;
-        if (!ReadProcessMemoryBytes(addr, size, data))
-            return {{"success", false}, {"error", "读取内存失败"}};
+        auto result = service_->readMemory(
+            service_->captureContext(true),
+            Mem::MemoryReadRequest{addr, size});
+        if (!result.ok())
+            return serviceFailure(result.error());
         return {{"success", true}, {"result", {
-            {"hex", BytesToHex(data)}, {"size", (int)data.size()}
+            {"hex", BytesToHex(result.value().bytes)},
+            {"size", result.value().bytes.size()}
         }}};
     });
 
     // ── write_memory ─────────────────────────────────────────────
-    RegisterMethod("write_memory", [](const json& p) -> json {
+    RegisterMethod("write_memory", [this](const json& p) -> json {
         uint64_t addr = ParseAddress(p, "address");
         std::string hexStr = getStringParam(
-            p, "hex", "", true, false, kMaxHttpRequestBytes);
+            p, "hex", "", true, false, IpcHttp::kMaxRequestBytes);
         auto data = HexToBytes(hexStr);
         if (data.empty()) {
             return {{"success", false}, {"error", "hex is empty"}};
@@ -927,25 +808,20 @@ void IpcServer::RegisterBuiltinMethods() {
         if (data.size() > kMaxIpcMemoryTransferBytes) {
             return {{"success", false}, {"error", "write data exceeds IPC limit"}};
         }
-        uint32_t size = (uint32_t)data.size();
-        int32_t written = 0;
-        if (!WriteProcessMemoryBytes(addr, size, data, PORT_MAIN, &written)) {
-            // 三态：完全失败 vs 部分写入（已产生副作用，不可当作未写入）
-            if (written > 0) {
-                std::ostringstream oss;
-                oss << "部分写入：仅连续写入 " << written << "/" << size
-                    << " 字节（已修改目标内存，剩余部分因不可写中断）";
-                return {{"success", false}, {"error", oss.str()},
-                        {"result", {{"written", written}}}};
-            }
-            return {{"success", false}, {"error", "写入内存失败"},
-                    {"result", {{"written", 0}}}};
-        }
-        return {{"success", true}, {"result", {{"written", (int)size}}}};
+        Mem::MemoryWriteRequest request;
+        request.address = addr;
+        request.bytes = std::move(data);
+        auto result = service_->writeMemory(
+            service_->captureContext(true), request);
+        if (!result.ok())
+            return serviceFailure(result.error());
+        return {{"success", true}, {"result", {
+            {"written", result.value().writtenBytes}
+        }}};
     });
 
     // ── read_batch ───────────────────────────────────────────────
-    RegisterMethod("read_batch", [](const json& p) -> json {
+    RegisterMethod("read_batch", [this](const json& p) -> json {
         if (!p.contains("addresses")) {
             throw std::invalid_argument("addresses is required");
         }
@@ -956,8 +832,8 @@ void IpcServer::RegisterBuiltinMethods() {
         if (addrsArr.empty() || addrsArr.size() > kMaxIpcBatchReadCount) {
             return {{"success", false}, {"error", "addresses 数量超出限制"}};
         }
-        std::vector<std::pair<uint64_t, int32_t>> addrs;
-        addrs.reserve(addrsArr.size());
+        Mem::MemoryBatchReadRequest request;
+        request.items.reserve(addrsArr.size());
         uint64_t totalBytes = 0;
         for (auto& item : addrsArr) {
             uint64_t a = ParseAddress(item, "address");
@@ -966,22 +842,21 @@ void IpcServer::RegisterBuiltinMethods() {
                 return {{"success", false}, {"error", "read_batch total size exceeds IPC limit"}};
             }
             totalBytes += s;
-            addrs.push_back({a, s});
+            request.items.push_back(Mem::MemoryReadRequest{a, s});
         }
-        std::vector<std::pair<uint64_t, std::vector<uint8_t>>> out;
-        if (!ReadBratchAddr(addrs, out))
-            return {{"success", false}, {"error", "批量读取失败"}};
+        auto result = service_->readMemoryBatch(
+            service_->captureContext(true), request);
+        if (!result.ok())
+            return serviceFailure(result.error());
         json arr = json::array();
-        for (auto& [a, d] : out) {
-            std::ostringstream addrStr;
-            addrStr << "0x" << std::hex << a;
-            std::vector<unsigned char> uc(d.begin(), d.end());
-            arr.push_back({{"address", addrStr.str()}, {"hex", BytesToHex(uc)}});
+        for (const auto& block : result.value().items) {
+            arr.push_back({{"address", formatAddress(block.address)},
+                           {"hex", BytesToHex(block.bytes)}});
         }
         return {{"success", true}, {"result", arr}};
     });
     // ── set_breakpoint ────────────────────────────────────────────
-    RegisterMethod("set_breakpoint", [](const json& p) -> json {
+    RegisterMethod("set_breakpoint", [this](const json& p) -> json {
         uint64_t addr = ParseAddress(p, "address");
         uint32_t bpType = getOptionalPositiveUintParam(p, "bp_type", 2u, 4u);
         uint32_t bpSize = getOptionalPositiveUintParam(p, "bp_size", 4u, 8u);
@@ -994,66 +869,81 @@ void IpcServer::RegisterBuiltinMethods() {
         if (bpType == 4) {
             bpSize = 4;
         }
-        if (!SetKernelBreakpoint(addr, bpType, bpSize))
-            return breakpointFailure("设置断点失败");
+        Mem::BreakpointSetRequest request;
+        request.address = addr;
+        request.access = static_cast<Mem::BreakpointAccess>(bpType);
+        request.size = bpSize;
+        auto result = service_->setBreakpoint(
+            service_->captureContext(true), request);
+        if (!result.ok())
+            return serviceFailure(result.error());
         return {{"success", true}, {"result", nullptr}};
     });
 
     // ── remove_breakpoint ────────────────────────────────────────
-    RegisterMethod("remove_breakpoint", [](const json& p) -> json {
+    RegisterMethod("remove_breakpoint", [this](const json& p) -> json {
         uint64_t addr = ParseAddress(p, "address");
-        if (!RemoveKernelBreakpoint(addr))
-            return breakpointFailure("移除断点失败");
+        auto result = service_->removeBreakpoint(
+            service_->captureContext(true),
+            Mem::BreakpointAddressRequest{addr});
+        if (!result.ok())
+            return serviceFailure(result.error());
         return {{"success", true}, {"result", nullptr}};
     });
 
     // ── suspend_breakpoint ───────────────────────────────────────
-    RegisterMethod("suspend_breakpoint", [](const json& p) -> json {
+    RegisterMethod("suspend_breakpoint", [this](const json& p) -> json {
         uint64_t addr = ParseAddress(p, "address");
-        if (!SuspendKernelBreakpoint(addr))
-            return breakpointFailure("暂停断点失败");
+        auto result = service_->suspendBreakpoint(
+            service_->captureContext(true),
+            Mem::BreakpointAddressRequest{addr});
+        if (!result.ok())
+            return serviceFailure(result.error());
         return {{"success", true}, {"result", nullptr}};
     });
 
     // ── resume_breakpoint ────────────────────────────────────────
-    RegisterMethod("resume_breakpoint", [](const json& p) -> json {
+    RegisterMethod("resume_breakpoint", [this](const json& p) -> json {
         uint64_t addr = ParseAddress(p, "address");
-        if (!ResumeKernelBreakpoint(addr))
-            return breakpointFailure("恢复断点失败");
+        auto result = service_->resumeBreakpoint(
+            service_->captureContext(true),
+            Mem::BreakpointAddressRequest{addr});
+        if (!result.ok())
+            return serviceFailure(result.error());
         return {{"success", true}, {"result", nullptr}};
     });
 
     // ── read_bp_info ─────────────────────────────────────────────
-    RegisterMethod("read_bp_info", [](const json& p) -> json {
+    RegisterMethod("read_bp_info", [this](const json& p) -> json {
         uint64_t addr = ParseAddress(p, "address");
-        std::vector<HW_HIT_INFO> infos;
-        uint64_t totalHits = 0;
-        if (!ReadKernelBreakpointInfo(addr, infos, PORT_MAIN, &totalHits))
-            return breakpointFailure("读取断点信息失败");
+        auto result = service_->breakpointHits(
+            service_->captureContext(true),
+            Mem::BreakpointHitBatchRequest{
+                addr, Mem::kMaxBreakpointHitCount});
+        if (!result.ok())
+            return serviceFailure(result.error());
         json arr = json::array();
-        for (auto& h : infos) {
+        for (const auto& h : result.value().items) {
             json regs = json::array();
             for (int i = 0; i < 31; i++)
-                regs.push_back(h.regs_info.regs[i]);
-            std::ostringstream hitStr, pcStr, spStr;
-            hitStr << "0x" << std::hex << h.hit_addr;
-            pcStr << "0x" << std::hex << h.regs_info.pc;
-            spStr << "0x" << std::hex << h.regs_info.sp;
+                regs.push_back(h.registers[static_cast<size_t>(i)]);
             arr.push_back({
-                {"hit_addr", hitStr.str()},
-                {"hit_time", h.hit_time},
-                {"pc", pcStr.str()},
-                {"sp", spStr.str()},
-                {"pstate", h.regs_info.pstate},
+                {"hit_addr", formatAddress(h.hitAddress)},
+                {"hit_time", h.hitTime},
+                {"pc", formatAddress(h.programCounter)},
+                {"sp", formatAddress(h.stackPointer)},
+                {"pstate", h.pstate},
                 {"regs", regs}
             });
         }
         return {{"success", true}, {"result",
-            {{"total_hits", totalHits}, {"returned", (int)infos.size()}, {"hits", arr}}}};
+            {{"total_hits", result.value().available},
+             {"returned", result.value().items.size()},
+             {"dropped", result.value().dropped}, {"hits", arr}}}};
     });
     // ── execute_lua ───────────────────────────────────────────────
 #ifdef HAVE_LUAJIT
-    RegisterMethod("execute_lua", [](const json& p) -> json {
+    RegisterMethod("execute_lua", [this](const json& p) -> json {
         std::string code = getStringParam(
             p, "code", "", true, false, kMaxIpcLuaCodeBytes);
         int timeoutSeconds = getClampedIntParam(
@@ -1061,7 +951,7 @@ void IpcServer::RegisterBuiltinMethods() {
             1, kMaxIpcLuaTimeoutSeconds);
         auto& engine = LuaEngine::GetInstance();
         if (!engine.IsInitialized()) {
-            if (!engine.Initialize())
+            if (!engine.Initialize(*service_))
                 return {{"success", false}, {"error", "Lua 引擎初始化失败: " + engine.GetLastError()}};
         }
         std::string output;
@@ -1078,19 +968,20 @@ void IpcServer::RegisterBuiltinMethods() {
 #endif
 
     // ── get_module_base ──────────────────────────────────────────
-    RegisterMethod("get_module_base", [](const json& p) -> json {
+    RegisterMethod("get_module_base", [this](const json& p) -> json {
         std::string name = getStringParam(
             p, "name", "", true, false, kMaxIpcStringParamBytes);
-        uint64_t base = 0;
-        if (!GetModuleBaseByName(name, base))
-            return {{"success", false}, {"error", "获取模块基址失败"}};
-        std::ostringstream oss;
-        oss << "0x" << std::hex << base;
-        return {{"success", true}, {"result", {{"base", oss.str()}}}};
+        auto result = service_->resolveModule(
+            service_->captureContext(true), Mem::ModuleResolveRequest{name});
+        if (!result.ok())
+            return serviceFailure(result.error());
+        return {{"success", true}, {"result", {
+            {"base", formatAddress(result.value().module.base)}
+        }}};
     });
 
     // ── resolve_offset_chain ─────────────────────────────────────
-    RegisterMethod("resolve_offset_chain", [](const json& p) -> json {
+    RegisterMethod("resolve_offset_chain", [this](const json& p) -> json {
         std::string moduleName = getStringParam(
             p, "module", "", true, false, kMaxIpcStringParamBytes);
         uint64_t baseOffset = ParseAddress(p, "base_offset");
@@ -1108,62 +999,118 @@ void IpcServer::RegisterBuiltinMethods() {
             }
         }
         bool derefFinal = getOptionalBoolParam(p, "deref_final", true);
-        uint64_t result = 0;
-        if (!ResolveModuleOffsetChain(result, moduleName, baseOffset, offsets, derefFinal))
-            return {{"success", false}, {"error", "解析偏移链失败"}};
-        std::ostringstream oss;
-        oss << "0x" << std::hex << result;
-        return {{"success", true}, {"result", {{"address", oss.str()}}}};
+        Mem::PointerResolveRequest request;
+        request.moduleName = moduleName;
+        request.baseOffset = baseOffset;
+        request.offsets = std::move(offsets);
+        request.dereferenceFinal = derefFinal;
+        auto result = service_->resolvePointer(
+            service_->captureContext(true), request);
+        if (!result.ok())
+            return serviceFailure(result.error());
+        return {{"success", true}, {"result", {
+            {"address", formatAddress(result.value().address)},
+            {"module_base", formatAddress(result.value().module.base)},
+            {"dereference_count", result.value().dereferenceCount}
+        }}};
     });
 
     // ── symbol_init ────────────────────────────────────────────────
-    RegisterMethod("symbol_init", [](const json& p) -> json {
+    RegisterMethod("symbol_init", [this](const json& p) -> json {
         uint64_t moduleBase = ParseAddress(p, "module_base");
-        int totalCount = 0;
-        if (!SymbolInit(moduleBase, totalCount))
-            return {{"success", false}, {"error", "初始化符号表失败"}};
-        return {{"success", true}, {"result", {{"total_count", totalCount}}}};
+        auto result = service_->loadSymbolTable(
+            service_->captureContext(true),
+            Mem::SymbolTableRequest{moduleBase});
+        if (!result.ok())
+            return serviceFailure(result.error());
+        const size_t totalCount = result.value().items.size();
+        {
+            std::lock_guard<std::mutex> lock(symbolCacheMutex_);
+            legacySymbolTable_ = std::move(result.value());
+        }
+        return {{"success", true}, {"result", {
+            {"total_count", totalCount}
+        }}};
     });
 
     // ── symbol_list ────────────────────────────────────────────────
-    RegisterMethod("symbol_list", [](const json& p) -> json {
+    RegisterMethod("symbol_list", [this](const json& p) -> json {
         int offset = getClampedIntParam(
             p, "offset", 0, 0, (std::numeric_limits<int>::max)());
         int count = getClampedIntParam(p, "count", 100, 1, 1000);
 
-        int totalCount = 0;
-        std::vector<std::pair<uint64_t, std::string>> symbols;
-        if (!SymbolGetList(offset, count, symbols, &totalCount))
-            return {{"success", false}, {"error", "获取符号列表失败，请先初始化符号表"}};
+        std::vector<Mem::SymbolInfo> symbols;
+        size_t totalCount = 0;
+        size_t pageOffset = static_cast<size_t>(offset);
+        bool hasModuleBase = false;
+        uint64_t moduleBase = 0;
+        if (p.contains("module_base") && !p.at("module_base").is_null()) {
+            if (!p.at("module_base").is_string() ||
+                !p.at("module_base").get<std::string>().empty()) {
+                moduleBase = ParseAddress(p, "module_base");
+                hasModuleBase = true;
+            }
+        }
+
+        if (hasModuleBase) {
+            Mem::SymbolListRequest request;
+            request.moduleBase = moduleBase;
+            request.offset = pageOffset;
+            request.limit = static_cast<size_t>(count);
+            auto result = service_->listSymbols(
+                service_->captureContext(true), request);
+            if (!result.ok())
+                return serviceFailure(result.error());
+            symbols = std::move(result.value().items);
+            totalCount = result.value().total;
+            pageOffset = result.value().offset;
+        } else {
+            const Mem::OperationContext current =
+                service_->captureContext(true);
+            std::lock_guard<std::mutex> lock(symbolCacheMutex_);
+            if (!legacySymbolTable_ || !current.target ||
+                legacySymbolTable_->target != *current.target) {
+                return {{"success", false},
+                        {"error", "symbol table is not initialized for the current target"},
+                        {"error_code", "symbol_session_changed"},
+                        {"retryable", false}};
+            }
+            totalCount = legacySymbolTable_->items.size();
+            pageOffset = std::min(pageOffset, totalCount);
+            const size_t end = std::min(
+                totalCount, pageOffset + static_cast<size_t>(count));
+            symbols.insert(symbols.end(),
+                           legacySymbolTable_->items.begin() + pageOffset,
+                           legacySymbolTable_->items.begin() + end);
+        }
 
         json arr = json::array();
-        for (const auto& [address, name] : symbols) {
-            std::ostringstream addrStr;
-            addrStr << "0x" << std::hex << address;
+        for (const auto& symbol : symbols) {
             arr.push_back({
-                {"address", addrStr.str()},
-                {"name", name}
+                {"address", formatAddress(symbol.address)},
+                {"name", symbol.name}
             });
         }
         return {{"success", true}, {"result", {
             {"total", totalCount},
-            {"offset", offset},
+            {"offset", pageOffset},
             {"symbols", arr}
         }}};
     });
 
     // ── symbol_find ────────────────────────────────────────────────
-    RegisterMethod("symbol_find", [](const json& p) -> json {
+    RegisterMethod("symbol_find", [this](const json& p) -> json {
         uint64_t moduleBase = ParseAddress(p, "module_base");
         std::string name = getStringParam(
             p, "name", "", true, false, kMaxIpcStringParamBytes);
-        uint64_t address = 0;
-        if (!SymbolFind(moduleBase, name, address) || address == 0)
-            return {{"success", false}, {"error", "查找符号失败"}};
-
-        std::ostringstream oss;
-        oss << "0x" << std::hex << address;
-        return {{"success", true}, {"result", {{"address", oss.str()}}}};
+        auto result = service_->resolveSymbol(
+            service_->captureContext(true),
+            Mem::SymbolResolveRequest{moduleBase, name});
+        if (!result.ok())
+            return serviceFailure(result.error());
+        return {{"success", true}, {"result", {
+            {"address", formatAddress(result.value().address)}
+        }}};
     });
 
 } // RegisterBuiltinMethods

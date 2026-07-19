@@ -1,16 +1,16 @@
-# AMem MCP Server
+# MiniMem MCP Server
 
-AMem MCP Server 是一个基于 [Model Context Protocol](https://modelcontextprotocol.io/) 的服务。它对 AI 助手暴露 MCP 工具，对内通过 HTTP JSON 代理到 AMem GUI 内嵌的 IPC Server，从而把 GUI 的 C++ 能力暴露给 Claude Code / Claude Desktop / Codex CLI / Cursor / VS Code Copilot / Continue 等客户端。
+MiniMem MCP Server 是一个基于 [Model Context Protocol](https://modelcontextprotocol.io/) 的服务。它对 AI 助手暴露 MCP 工具，对内通过 HTTP JSON 代理到 MiniMem GUI 内嵌的 IPC Server。为兼容既有配置，Python 包与命令仍名为 `amem_mcp` / `amem-mcp`。
 
 ## 架构
 
 ```
-AI 助手  ←── stdio ──→  amem-mcp (Python)  ←── HTTP JSON ──→  AMem GUI (C++ IPC :28100)
+AI 助手  ←── stdio ──→  amem-mcp (Python)  ←── HTTP JSON ──→  MiniMem GUI (C++ IPC :28100)
                                                                        ↕
                                                                  Android 设备
 ```
 
-MCP Server 本身不直接与 Android 设备通信，所有操作都委托给 AMem GUI 的 IPC Server（默认监听 `127.0.0.1:28100`）。默认业务路径是 HTTP JSON 代理路径：MCP 工具收到调用后，会把请求转成 HTTP JSON 发给 GUI IPC Server。
+MCP Server 本身不直接与 Android 设备通信，所有操作都委托给 MiniMem GUI 的 IPC Server（默认监听 `127.0.0.1:28100`）。
 
 ### 协议分层说明
 
@@ -19,9 +19,9 @@ MCP Server 本身不直接与 Android 设备通信，所有操作都委托给 AM
 | 连接 | 协议 / 传输 | 说明 |
 |------|-------------|------|
 | AI 助手 ↔ `amem-mcp` | MCP over `stdio` | IDE/Codex 启动本地 Python 进程，通过标准输入输出交换 MCP 消息 |
-| `amem-mcp` ↔ AMem GUI IPC Server | HTTP JSON | 默认业务路径。MCP 工具内部把请求转发到 GUI 的 IPC Server，默认地址 `http://127.0.0.1:28100` |
+| `amem-mcp` ↔ MiniMem GUI IPC Server | HTTP JSON | 默认业务路径。MCP 工具内部把请求转发到 GUI 的 IPC Server，默认地址 `http://127.0.0.1:28100` |
 
-因此 `.mcp.json` / `~/.codex/config.toml` 里配置的是第一层：用 `command` 启动 `amem-mcp`，不是填 HTTP URL。真正访问 AMem 的默认路径是第二层 HTTP JSON，地址通过 `AMEM_IPC_HOST` / `AMEM_IPC_PORT` 或 `--ipc-host` / `--ipc-port` 指定。
+因此 `.mcp.json` / `~/.codex/config.toml` 里配置的是第一层：用 `command` 启动 `amem-mcp`，不是填 HTTP URL。真正访问 MiniMem 的默认路径是第二层 HTTP JSON，地址通过 `AMEM_IPC_HOST` / `AMEM_IPC_PORT` 或 `--ipc-host` / `--ipc-port` 指定。
 
 当前 Python MCP 入口仅支持 `stdio`：
 
@@ -33,7 +33,7 @@ python -m amem_mcp --transport stdio
 ## 环境要求
 
 - Python 3.10+
-- AMem GUI 已启动（IPC Server 随 GUI 自动启动）
+- MiniMem GUI 已启动（IPC Server 随 GUI 自动启动）
 
 ## 安装
 
@@ -98,7 +98,7 @@ amem-mcp --ipc-host 127.0.0.1 --ipc-port 28100 # 指定 IPC 地址
 | Windows 原生 IDE | `D:/AndroidMEM/AndroidMiniMem/mcp` |
 | WSL / Linux Codex | `/home/qiu/桌面/MEMTool/AndroidMiniMem/mcp` |
 
-`AMEM_IPC_HOST` / `AMEM_IPC_PORT` 指的是 AMem GUI IPC Server 地址，不是 MCP Server 的监听地址。
+`AMEM_IPC_HOST` / `AMEM_IPC_PORT` 指的是 MiniMem GUI IPC Server 地址，不是 MCP Server 的监听地址。
 
 ---
 
@@ -231,7 +231,7 @@ VS Code 的 MCP 配置 key 是 `servers` 而不是 `mcpServers`。放置于项�
 
 ## 通信协议
 
-本节描述默认业务通信路径：`amem-mcp` 内部通过 HTTP POST 向 AMem GUI IPC Server 发送 JSON 请求。MCP 客户端本身仍然通过 `stdio` 调用 `amem-mcp`，但所有进程、模块、内存、断点、Lua、符号等工具最终默认都会走这条 HTTP JSON 代理路径。
+本节描述默认业务通信路径：`amem-mcp` 内部通过 HTTP POST 向 MiniMem GUI IPC Server 发送 JSON 请求。MCP 客户端本身仍然通过 `stdio` 调用 `amem-mcp`，但所有进程、模块、内存、断点、Lua、符号等工具最终默认都会走这条 HTTP JSON 代理路径。
 
 ```json
 // 请求
@@ -241,7 +241,7 @@ VS Code 的 MCP 配置 key 是 `servers` 而不是 `mcpServers`。放置于项�
 { "success": true, "result": { "hex": "48656c6c6f...", "size": 256 } }
 ```
 
-默认 30 秒超时，扫描类操作 60 秒。仅支持本地回环地址。
+默认 30 秒超时，进程/模块列表和 Lua 等耗时操作使用更长预算。GUI IPC 仅监听本地回环地址。
 
 `reference/` 目录里的二进制协议客户端只作为历史/参考实现保留，MCP Server 默认不使用它。
 
@@ -281,7 +281,7 @@ VS Code 的 MCP 配置 key 是 `servers` 而不是 `mcpServers`。放置于项�
 
 ### 硬件断点
 
-断点类型编号与 AMem 内部（GUI / Lua / IPC）完全一致，MCP 层不做任何翻译：
+断点类型编号与 MiniMem 内部（GUI / Lua / IPC）完全一致，MCP 层不做任何翻译：
 
 | `bp_type` | 语义 | 字符串别名 |
 |-----------|------|-----------|
@@ -318,7 +318,7 @@ VS Code 的 MCP 配置 key 是 `servers` 而不是 `mcpServers`。放置于项�
 
 | URI | 说明 |
 |-----|------|
-| `amem://status` | 当前 AMem GUI 状态（连接、PID、进程名） |
+| `amem://status` | 当前 MiniMem GUI 状态（连接、PID、进程名） |
 
 ---
 
@@ -347,8 +347,8 @@ mcp/
 │   ├── __init__.py
 │   ├── __main__.py          # python -m amem_mcp 入口
 │   ├── app.py               # FastMCP 装配 + main()
-│   ├── constants.py         # 扫描 flag / 数据类型 / 内存类型
-│   ├── helpers.py           # hex_dump / encode_value / make_scan_flags
+│   ├── constants.py         # 数据类型 / 硬件断点
+│   ├── helpers.py           # hex_dump / encode_value / 参数校验
 │   ├── ipc_client.py        # HTTP JSON 客户端
 │   └── tools/               # 工具按域拆分
 │       ├── status.py        # 状态、版本、架构、驱动

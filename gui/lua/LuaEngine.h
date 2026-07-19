@@ -19,6 +19,7 @@ extern "C" {
 #include <vector>
 #include <functional>
 #include <mutex>
+namespace Mem { class IMemService; }
 
 /**
  * LuaJIT引擎核心类
@@ -34,7 +35,7 @@ public:
     LuaEngine& operator=(const LuaEngine&) = delete;
 
     // 初始化和清理
-    bool Initialize();
+    bool Initialize(Mem::IMemService& service);
     void Shutdown();
 
     // 脚本执行
@@ -102,5 +103,6 @@ private:
     
     // 线程安全
     mutable std::mutex mutex;
+    Mem::IMemService* memService_ = nullptr;
 };
 

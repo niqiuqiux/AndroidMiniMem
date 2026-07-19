@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AMem MCP Server 启动脚本 (兼容入口).
+"""MiniMem MCP Server 启动脚本（兼容入口）。
 
 为兼容历史配置保留此文件。推荐使用以下任一方式启动:
 

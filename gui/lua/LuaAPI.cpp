@@ -2,9 +2,8 @@
 #include "LuaAPI_Memory.h"
 #include "LuaAPI_ImGui.h"
 #include "LuaAPI_Assembly.h"
-#include "../socket/client_singleton.h"
+#include "../mem/IMemService.h"
 #include "../socket/socket_io_timeout.h"
-#include "../gui/AppContext.h"
 #include "../gui/Gui.h"
 #include <string>
 #include <vector>
@@ -92,6 +91,8 @@ static const char* luaL_tolstring_compat(lua_State* L, int idx, size_t* len) {
 namespace {
 constexpr size_t kMaxLuaOffsetCount = 1024;
 constexpr int kLuaSleepPollMs = 50;
+char g_memServiceRegistryKey;
+char g_operationContextRegistryKey;
 
 bool isValidBreakpointSize(uint32_t size) {
     return size == 1 || size == 2 || size == 4 || size == 8;
@@ -159,7 +160,11 @@ void LuaAPI::PushError(lua_State* L, const std::string& msg) {
 }
 
 // ==================== 注册所有API ====================
-void LuaAPI::RegisterAll(lua_State* L) {
+void LuaAPI::RegisterAll(lua_State* L, Mem::IMemService& service) {
+    lua_pushlightuserdata(L, &g_memServiceRegistryKey);
+    lua_pushlightuserdata(L, &service);
+    lua_settable(L, LUA_REGISTRYINDEX);
+
     // 注册内存操作 API
     LuaAPI_Memory::Register(L);
 
@@ -213,27 +218,87 @@ void LuaAPI::RegisterAll(lua_State* L) {
     LuaAPI_Assembly::Register(L);
 }
 
+Mem::IMemService& LuaAPI::Service(lua_State* L) {
+    lua_pushlightuserdata(L, &g_memServiceRegistryKey);
+    lua_gettable(L, LUA_REGISTRYINDEX);
+    auto* service =
+        static_cast<Mem::IMemService*>(lua_touserdata(L, -1));
+    lua_pop(L, 1);
+    if (!service) {
+        luaL_error(L, "memory service is not bound to this Lua state");
+    }
+    return *service;
+}
+
+Mem::OperationContext* LuaAPI::BoundOperationContext(lua_State* L) {
+    lua_pushlightuserdata(L, &g_operationContextRegistryKey);
+    lua_gettable(L, LUA_REGISTRYINDEX);
+    auto* context = static_cast<Mem::OperationContext*>(
+        lua_touserdata(L, -1));
+    lua_pop(L, 1);
+    return context;
+}
+
+Mem::OperationContext LuaAPI::GetOperationContext(
+    lua_State* L, bool includeTarget) {
+    Mem::OperationContext* bound = BoundOperationContext(L);
+    if (!bound)
+        return Service(L).captureContext(includeTarget);
+
+    Mem::OperationContext context = *bound;
+    if (!includeTarget)
+        context.target.reset();
+    return context;
+}
+
+Mem::OperationContext* LuaAPI::BindOperationContext(
+    lua_State* L, Mem::OperationContext* context) {
+    Mem::OperationContext* previous = BoundOperationContext(L);
+    lua_pushlightuserdata(L, &g_operationContextRegistryKey);
+    if (context)
+        lua_pushlightuserdata(L, context);
+    else
+        lua_pushnil(L);
+    lua_settable(L, LUA_REGISTRYINDEX);
+    return previous;
+}
+
 // ==================== 内存操作API实现 ====================
 // 已移至 LuaAPI_Memory.cpp
 
 // ==================== 进程和模块API实现 ====================
 int LuaAPI::GetProcessList(lua_State* L) {
-    std::vector<ProcessInfoItem> processes;
-    if (FetchProcessList(processes)) {
-        lua_newtable(L);
-        for (size_t i = 0; i < processes.size(); ++i) {
-            lua_pushinteger(L, i + 1);
-            lua_newtable(L);
-            lua_pushinteger(L, processes[i].pid);
-            lua_setfield(L, -2, "pid");
-            lua_pushstring(L, processes[i].name.c_str());
-            lua_setfield(L, -2, "name");
-            lua_settable(L, -3);
+    auto& service = Service(L);
+    const Mem::OperationContext context = GetOperationContext(L, false);
+    std::vector<Mem::ProcessInfo> processes;
+    size_t offset = 0;
+    while (true) {
+        Mem::ProcessListRequest request;
+        request.offset = offset;
+        request.limit = Mem::kMaxProcessPageSize;
+        auto result = service.listProcesses(context, request);
+        if (!result.ok()) {
+            PushError(L, result.error().message);
+            return 2;
         }
-        return 1;
+        auto& page = result.value();
+        processes.insert(processes.end(), page.items.begin(), page.items.end());
+        if (!page.nextOffset) {
+            break;
+        }
+        offset = *page.nextOffset;
     }
-    LuaAPI::PushError(L, "Failed to get process list");
-    return 2;
+    lua_newtable(L);
+    for (size_t i = 0; i < processes.size(); ++i) {
+        lua_pushinteger(L, i + 1);
+        lua_newtable(L);
+        lua_pushinteger(L, processes[i].pid);
+        lua_setfield(L, -2, "pid");
+        lua_pushstring(L, processes[i].name.c_str());
+        lua_setfield(L, -2, "name");
+        lua_settable(L, -3);
+    }
+    return 1;
 }
 
 int LuaAPI::AttachProcess(lua_State* L) {
@@ -243,64 +308,98 @@ int LuaAPI::AttachProcess(lua_State* L) {
         return 0;
     }
 
-    int pid = static_cast<int>(rawPid);
-    AppContext::Get().selectProcess(pid, "");
-    if (AppContext::Get().hasProcess()) {
+    auto& service = Service(L);
+    Mem::OpenProcessRequest request;
+    request.pid = static_cast<int>(rawPid);
+    Mem::OperationContext* bound = BoundOperationContext(L);
+    const Mem::OperationContext expected =
+        bound ? *bound : service.captureContext(true);
+    auto result = service.openProcess(expected, request);
+    if (result.ok()) {
+        if (bound) {
+            const Mem::OperationContext current =
+                service.captureContext(true);
+            if (current.connectionGeneration !=
+                    bound->connectionGeneration ||
+                !current.target ||
+                *current.target != result.value().target) {
+                PushError(L,
+                          "target changed while Lua process selection was being committed");
+                return 2;
+            }
+            bound->target = result.value().target;
+        }
         lua_pushboolean(L, 1);
         return 1;
     }
-    LuaAPI::PushError(L, "Failed to attach process");
+    PushError(L, result.error().message);
     return 2;
 }
 
 int LuaAPI::GetCurrentPid(lua_State* L) {
-    int pid = ::GetCurrentPid();
-    lua_pushinteger(L, pid);
+    const auto context = GetOperationContext(L, true);
+    lua_pushinteger(L, context.target ? context.target->pid : 0);
     return 1;
 }
 
 int LuaAPI::GetModuleList(lua_State* L) {
-    std::vector<ModuleInfoItem> modules;
-    if (FetchModuleList(modules)) {
-        lua_newtable(L);
-        for (size_t i = 0; i < modules.size(); ++i) {
-            lua_pushinteger(L, i + 1);
-            lua_newtable(L);
-            lua_pushstring(L, modules[i].name.c_str());
-            lua_setfield(L, -2, "name");
-            lua_pushnumber(L, static_cast<lua_Number>(modules[i].base));
-            lua_setfield(L, -2, "base");
-            lua_pushinteger(L, modules[i].size);
-            lua_setfield(L, -2, "size");
-            // 权限：flag 原始位掩码 + rwxp 字符串
-            // 位定义与设备端一致：1=读 2=写 4=执行 8=私有(p) 16=共享(s)
-            const int flag = modules[i].flag;
-            lua_pushinteger(L, flag);
-            lua_setfield(L, -2, "flag");
-            char perms[5];
-            perms[0] = (flag & 1) ? 'r' : '-';
-            perms[1] = (flag & 2) ? 'w' : '-';
-            perms[2] = (flag & 4) ? 'x' : '-';
-            perms[3] = (flag & 8) ? 'p' : ((flag & 16) ? 's' : '-');
-            perms[4] = '\0';
-            lua_pushstring(L, perms);
-            lua_setfield(L, -2, "perms");
-            lua_settable(L, -3);
+    auto& service = Service(L);
+    const Mem::OperationContext context = GetOperationContext(L, true);
+    std::vector<Mem::ModuleInfo> modules;
+    size_t offset = 0;
+    while (true) {
+        Mem::ModuleListRequest request;
+        request.offset = offset;
+        request.limit = Mem::kMaxModulePageSize;
+        auto result = service.listModules(context, request);
+        if (!result.ok()) {
+            PushError(L, result.error().message);
+            return 2;
         }
-        return 1;
+        auto& page = result.value();
+        modules.insert(modules.end(), page.items.begin(), page.items.end());
+        if (!page.nextOffset) {
+            break;
+        }
+        offset = *page.nextOffset;
     }
-    LuaAPI::PushError(L, "Failed to get module list");
-    return 2;
+    lua_newtable(L);
+    for (size_t i = 0; i < modules.size(); ++i) {
+        lua_pushinteger(L, i + 1);
+        lua_newtable(L);
+        lua_pushstring(L, modules[i].name.c_str());
+        lua_setfield(L, -2, "name");
+        lua_pushnumber(L, static_cast<lua_Number>(modules[i].base));
+        lua_setfield(L, -2, "base");
+        lua_pushnumber(L, static_cast<lua_Number>(modules[i].size));
+        lua_setfield(L, -2, "size");
+        const int flag = modules[i].flag;
+        lua_pushinteger(L, flag);
+        lua_setfield(L, -2, "flag");
+        char perms[5] = {
+            (flag & 1) ? 'r' : '-',
+            (flag & 2) ? 'w' : '-',
+            (flag & 4) ? 'x' : '-',
+            (flag & 8) ? 'p' : ((flag & 16) ? 's' : '-'),
+            '\0'};
+        lua_pushstring(L, perms);
+        lua_setfield(L, -2, "perms");
+        lua_settable(L, -3);
+    }
+    return 1;
 }
 
 int LuaAPI::GetModuleBase(lua_State* L) {
     const char* moduleName = luaL_checkstring(L, 1);
-    uint64_t base;
-    if (GetModuleBaseByName(moduleName, base)) {
-        lua_pushnumber(L, static_cast<lua_Number>(base));
+    auto& service = Service(L);
+    auto result = service.resolveModule(
+        GetOperationContext(L, true), Mem::ModuleResolveRequest{moduleName});
+    if (result.ok()) {
+        lua_pushnumber(L,
+                       static_cast<lua_Number>(result.value().module.base));
         return 1;
     }
-    LuaAPI::PushError(L, "Module not found");
+    PushError(L, result.error().message);
     return 2;
 }
 
@@ -324,14 +423,16 @@ int LuaAPI::ResolveOffsetChain(lua_State* L) {
         lua_pop(L, 1);
     }
 
-    uint64_t address;
-    // ResolveModuleOffsetChain 参数: (outAddress, moduleName, baseOffset, offsets, derefFinal, type)
-    // baseOffset 设为 0，derefFinal 设为 true（默认值）
-    if (ResolveModuleOffsetChain(address, moduleName, 0, offsets, true, PORT_MAIN)) {
-        lua_pushnumber(L, static_cast<lua_Number>(address));
+    Mem::PointerResolveRequest request;
+    request.moduleName = moduleName;
+    request.offsets = std::move(offsets);
+    auto& service = Service(L);
+    auto result = service.resolvePointer(GetOperationContext(L, true), request);
+    if (result.ok()) {
+        lua_pushnumber(L, static_cast<lua_Number>(result.value().address));
         return 1;
     }
-    LuaAPI::PushError(L, "Failed to resolve offset chain");
+    PushError(L, result.error().message);
     return 2;
 }
 
@@ -353,49 +454,81 @@ int LuaAPI::SetBreakpoint(lua_State* L) {
 
     if (typeFlag == 4) bpSize = 4;
 
-    bool success = SetKernelBreakpoint(address, typeFlag, bpSize);
-    lua_pushboolean(L, success ? 1 : 0);
+    Mem::BreakpointSetRequest request;
+    request.address = address;
+    request.access = static_cast<Mem::BreakpointAccess>(typeFlag);
+    request.size = bpSize;
+    auto& service = Service(L);
+    auto result = service.setBreakpoint(GetOperationContext(L, true), request);
+    if (!result.ok()) {
+        PushError(L, result.error().message);
+        return 2;
+    }
+    lua_pushboolean(L, 1);
     return 1;
 }
 
 int LuaAPI::RemoveBreakpoint(lua_State* L) {
     uint64_t address = LuaAPI::CheckAddress(L, 1);
-    bool success = RemoveKernelBreakpoint(address);
-    lua_pushboolean(L, success ? 1 : 0);
+    auto& service = Service(L);
+    auto result = service.removeBreakpoint(
+        GetOperationContext(L, true), Mem::BreakpointAddressRequest{address});
+    if (!result.ok()) {
+        PushError(L, result.error().message);
+        return 2;
+    }
+    lua_pushboolean(L, 1);
     return 1;
 }
 
 int LuaAPI::SuspendBreakpoint(lua_State* L) {
     uint64_t address = LuaAPI::CheckAddress(L, 1);
-    bool success = SuspendKernelBreakpoint(address);
-    lua_pushboolean(L, success ? 1 : 0);
+    auto& service = Service(L);
+    auto result = service.suspendBreakpoint(
+        GetOperationContext(L, true), Mem::BreakpointAddressRequest{address});
+    if (!result.ok()) {
+        PushError(L, result.error().message);
+        return 2;
+    }
+    lua_pushboolean(L, 1);
     return 1;
 }
 
 int LuaAPI::ResumeBreakpoint(lua_State* L) {
     uint64_t address = LuaAPI::CheckAddress(L, 1);
-    bool success = ResumeKernelBreakpoint(address);
-    lua_pushboolean(L, success ? 1 : 0);
+    auto& service = Service(L);
+    auto result = service.resumeBreakpoint(
+        GetOperationContext(L, true), Mem::BreakpointAddressRequest{address});
+    if (!result.ok()) {
+        PushError(L, result.error().message);
+        return 2;
+    }
+    lua_pushboolean(L, 1);
     return 1;
 }
 
 int LuaAPI::GetBreakpointInfo(lua_State* L) {
     uint64_t address = LuaAPI::CheckAddress(L, 1);
-    std::vector<HW_HIT_INFO> infos;
-    if (ReadKernelBreakpointInfo(address, infos)) {
+    auto& service = Service(L);
+    auto result = service.breakpointHits(
+        GetOperationContext(L, true),
+        Mem::BreakpointHitBatchRequest{address,
+                                       Mem::kMaxBreakpointHitCount});
+    if (result.ok()) {
+        const auto& infos = result.value().items;
         lua_newtable(L);
         for (size_t i = 0; i < infos.size(); ++i) {
             lua_pushinteger(L, i + 1);
             lua_newtable(L);
-            lua_pushnumber(L, static_cast<lua_Number>(infos[i].hit_addr));
+            lua_pushnumber(L, static_cast<lua_Number>(infos[i].hitAddress));
             lua_setfield(L, -2, "addr");
-            lua_pushnumber(L, static_cast<lua_Number>(infos[i].hit_time));
+            lua_pushnumber(L, static_cast<lua_Number>(infos[i].hitTime));
             lua_setfield(L, -2, "time");
             lua_settable(L, -3);
         }
         return 1;
     }
-    LuaAPI::PushError(L, "Failed to get breakpoint info");
+    PushError(L, result.error().message);
     return 2;
 }
 
