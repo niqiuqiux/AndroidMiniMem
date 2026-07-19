@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Window.h"
+#include "../lua/LuaEngine.h"
+#include <future>
 #include <vector>
 #include <string>
 #include <filesystem>
@@ -25,6 +27,7 @@ private:
     void executeScript(const std::string& filepath);
     void stopScript();
     void reloadScript(const std::string& name);
+    void pollScriptExecution();
     void saveCurrentScript();
 
     // 脚本列表
@@ -39,7 +42,11 @@ private:
 
     // 脚本执行状态
     bool scriptRunning = false;
+    bool stopRequested = false;
     std::string currentScript;
+    std::string completionSuccessMessage;
+    Mem::CancellationToken scriptCancellation;
+    std::future<LuaExecutionResult> scriptFuture;
     std::string currentScriptContent;
     bool currentScriptDirty = false;
 

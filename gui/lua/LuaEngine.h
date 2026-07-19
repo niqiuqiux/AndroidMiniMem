@@ -1,12 +1,10 @@
 #pragma once
 
 #ifdef HAVE_LUAJIT
-// LuaJIT使用lua.hpp（包含所有必要的头文件）
 extern "C" {
 #include "lua.hpp"
 }
 #else
-// 如果没有LuaJIT，使用标准Lua头文件
 extern "C" {
 #include <lua.h>
 #include <lauxlib.h>
@@ -14,95 +12,108 @@ extern "C" {
 }
 #endif
 
-#include <string>
+#include "../mem/MemTypes.h"
+
+#include <chrono>
 #include <map>
-#include <vector>
-#include <functional>
 #include <mutex>
+#include <string>
+#include <vector>
+
 namespace Mem { class IMemService; }
 
+struct LuaExecutionResult {
+    bool success = false;
+    bool busy = false;
+    std::string error;
+};
+
 /**
- * LuaJIT引擎核心类
- * 单例模式，管理Lua状态机和脚本执行
+ * LuaJIT 引擎核心类。
+ *
+ * MiniMem 只维护一个 Lua 状态机，所有状态访问都必须经过本类的锁和执行
+ * 上下文，避免 GUI 回调与 IPC 工作线程并发操作 lua_State。
  */
 class LuaEngine {
 public:
-    // 获取单例实例
+    using Clock = std::chrono::steady_clock;
+    using Deadline = Clock::time_point;
+
+    enum class ExecutionMode {
+        None,
+        GuiScript,
+        GuiFrame,
+        Ipc,
+    };
+
     static LuaEngine& GetInstance();
 
-    // 禁止拷贝和赋值
     LuaEngine(const LuaEngine&) = delete;
     LuaEngine& operator=(const LuaEngine&) = delete;
 
-    // 初始化和清理
-    bool Initialize(Mem::IMemService& service);
+    LuaExecutionResult Initialize(
+        Mem::IMemService& service,
+        Deadline deadline = (Deadline::max)());
     void Shutdown();
 
-    // 脚本执行
-    bool ExecuteFile(const std::string& filepath);
-    bool ExecuteString(const std::string& code);
-    bool ExecuteString(const std::string& code, const std::string& chunkName);
+    LuaExecutionResult ExecuteFile(
+        const std::string& filepath,
+        Mem::CancellationToken cancellation = {},
+        Deadline deadline = (Deadline::max)());
+    LuaExecutionResult ExecuteString(
+        const std::string& code,
+        const std::string& chunkName = "=string",
+        Mem::CancellationToken cancellation = {},
+        Deadline deadline = (Deadline::max)());
 
-    // 执行代码并捕获 print 输出（线程安全，用于 IPC）
-    bool ExecuteStringCapture(const std::string& code,
-                              const std::string& chunkName,
-                              std::string& output,
-                              int timeoutMs = 0);
+    // IPC 专用入口：在每次调用独立的白名单环境中执行并捕获 print 输出。
+    LuaExecutionResult ExecuteStringCapture(
+        const std::string& code,
+        const std::string& chunkName,
+        std::string& output,
+        Deadline deadline);
 
-    // 脚本管理
-    bool ReloadScript(const std::string& name);
+    LuaExecutionResult ReloadScript(
+        const std::string& name,
+        Mem::CancellationToken cancellation = {},
+        Deadline deadline = (Deadline::max)());
     void UnloadScript(const std::string& name);
     bool IsScriptLoaded(const std::string& name) const;
 
-    // 回调注册（用于C++调用Lua函数）
-    bool RegisterCallback(const std::string& name, const std::string& luaFunctionName);
-    bool CallCallback(const std::string& name, int nargs = 0, int nresults = 0);
+    // GUI 每帧调用使用非阻塞锁；引擎忙时直接跳过该帧。
+    LuaExecutionResult InvokeGuiCallback(
+        const std::string& luaFunctionName,
+        int windowId);
 
-    // 状态管理
-    lua_State* GetState() { return L; }
-    bool IsInitialized() const { return initialized; }
-
-    // 错误处理
-    std::string GetLastError() const { return lastError; }
-    void ClearError() { lastError.clear(); }
-
-    // 设置脚本搜索路径
     void AddScriptPath(const std::string& path);
     void SetScriptBasePath(const std::string& path);
-
-    // 获取已加载的脚本列表
     std::vector<std::string> GetLoadedScripts() const;
+
+    // 仅供受守卫的 Lua C API 判断当前调用边界，不暴露 lua_State 所有权。
+    static ExecutionMode CurrentExecutionMode(lua_State* state);
 
 private:
     LuaEngine() = default;
     ~LuaEngine();
 
-    // 内部辅助方法
-    bool ExecuteFileLocked(const std::string& filepath);
+    LuaExecutionResult ExecuteFileLocked(
+        const std::string& filepath,
+        const Mem::CancellationToken& cancellation,
+        Deadline deadline);
+    LuaExecutionResult ExecuteStringLocked(
+        const std::string& code,
+        const std::string& chunkName,
+        const Mem::CancellationToken& cancellation,
+        Deadline deadline);
     void AddScriptPathLocked(const std::string& path);
-    bool CheckLuaError(int result);
-    void PushErrorHandler();
-    std::string GetLuaError(lua_State* L);
-    
-    // 注册标准库
+    std::string GetLuaError(lua_State* state);
     void RegisterStandardLibs();
-    
-    // 注册自定义API
     void RegisterAPIs();
 
     lua_State* L = nullptr;
     bool initialized = false;
-    std::string lastError;
     std::string scriptBasePath = "./scripts";
-    
-    // 已加载的脚本（文件名 -> 文件路径）
     std::map<std::string, std::string> loadedScripts;
-    
-    // 回调函数映射（回调名 -> Lua函数名）
-    std::map<std::string, std::string> callbacks;
-    
-    // 线程安全
-    mutable std::mutex mutex;
+    mutable std::timed_mutex mutex;
     Mem::IMemService* memService_ = nullptr;
 };
-

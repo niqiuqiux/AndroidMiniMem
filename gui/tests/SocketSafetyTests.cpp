@@ -25,15 +25,31 @@ void testTimeoutScopes() {
     {
         SocketIoTimeout::ScopedTimeout timeout(1);
         check(SocketIoTimeout::HasThreadTimeout() &&
-                  SocketIoTimeout::GetThreadTimeoutMs() == 1000,
+                  SocketIoTimeout::GetThreadTimeoutMs() <= 1000,
               "second-based timeout should publish its budget");
+        const auto outerDeadline = SocketIoTimeout::GetThreadDeadline();
         {
             SocketIoTimeout::ScopedTimeout nested(10);
-            check(SocketIoTimeout::GetThreadTimeoutMs() == 10000,
-                  "nested timeout should temporarily replace the budget");
+            check(SocketIoTimeout::GetThreadDeadline() == outerDeadline,
+                  "nested timeout must not extend the outer deadline");
+            {
+                SocketIoTimeout::ScopedTimeout unlimited(0);
+                check(SocketIoTimeout::GetThreadDeadline() == outerDeadline,
+                      "nested unlimited scope must retain the outer deadline");
+            }
         }
-        check(SocketIoTimeout::GetThreadTimeoutMs() == 1000,
-              "nested timeout should restore the outer budget");
+        check(SocketIoTimeout::GetThreadDeadline() == outerDeadline,
+              "nested timeout should restore the outer deadline");
+
+        const auto shorterDeadline = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(100);
+        {
+            SocketIoTimeout::ScopedTimeout nested(shorterDeadline);
+            check(SocketIoTimeout::GetThreadDeadline() == shorterDeadline,
+                  "nested timeout should accept an earlier deadline");
+        }
+        check(SocketIoTimeout::GetThreadDeadline() == outerDeadline,
+              "earlier nested deadline should restore the outer deadline");
     }
     check(!SocketIoTimeout::HasThreadTimeout(),
           "timeout scope should restore the default state");

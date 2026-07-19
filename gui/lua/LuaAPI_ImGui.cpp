@@ -1,5 +1,6 @@
 #include "LuaAPI_ImGui.h"
 #include "LuaAPI.h"
+#include "LuaEngine.h"
 #include "../gui/Gui.h"
 #include "../gui/LuaImGuiWindow.h"
 #include "../imgui/imgui.h"
@@ -10,6 +11,7 @@
 #include <cstring>
 #include <cmath>
 #include <limits>
+#include <new>
 #include <utility>
 
 // 全局窗口管理器：窗口ID -> 窗口指针
@@ -28,6 +30,48 @@ namespace {
 constexpr int kMaxLuaTableColumns = 511;
 constexpr int kMaxLuaLegacyColumns = 512;
 constexpr int kMaxLuaListBoxItems = 65536;
+
+constexpr unsigned ExecutionModeBit(LuaEngine::ExecutionMode mode) {
+    return 1u << static_cast<unsigned>(mode);
+}
+
+constexpr unsigned kGuiScriptMode =
+    ExecutionModeBit(LuaEngine::ExecutionMode::GuiScript);
+constexpr unsigned kGuiFrameMode =
+    ExecutionModeBit(LuaEngine::ExecutionMode::GuiFrame);
+
+struct GuardedImGuiFunction {
+    lua_CFunction function = nullptr;
+    unsigned allowedModes = 0;
+    const char* name = nullptr;
+};
+
+int GuardedImGuiDispatch(lua_State* L) {
+    auto* guarded = static_cast<GuardedImGuiFunction*>(
+        lua_touserdata(L, lua_upvalueindex(1)));
+    if (!guarded || !guarded->function) {
+        return luaL_error(L, "invalid guarded ImGui function");
+    }
+
+    const LuaEngine::ExecutionMode mode =
+        LuaEngine::CurrentExecutionMode(L);
+    if ((guarded->allowedModes & ExecutionModeBit(mode)) == 0) {
+        return luaL_error(
+            L, "imgui.%s is not available in this Lua execution context",
+            guarded->name ? guarded->name : "<unknown>");
+    }
+    return guarded->function(L);
+}
+
+void RegisterGuardedImGuiFunction(lua_State* L,
+                                  const char* name,
+                                  lua_CFunction function,
+                                  unsigned allowedModes) {
+    void* storage = lua_newuserdata(L, sizeof(GuardedImGuiFunction));
+    new (storage) GuardedImGuiFunction{function, allowedModes, name};
+    lua_pushcclosure(L, GuardedImGuiDispatch, 1);
+    lua_setfield(L, -2, name);
+}
 
 int checkIntRange(lua_State* L, int index, int minValue, int maxValue, const char* name) {
     lua_Integer value = luaL_checkinteger(L, index);
@@ -150,110 +194,57 @@ ImVec2 LuaAPI_ImGui::GetVec2(lua_State* L, int index) {
 
 // ==================== 注册 ImGui API ====================
 void LuaAPI_ImGui::Register(lua_State* L) {
-    // 创建imgui表
+    // 每个函数都通过执行模式守卫，避免后台线程直接访问 ImGui 状态。
     lua_newtable(L);
-    
-    // 窗口管理
-    lua_pushcfunction(L, CreateWindow);
-    lua_setfield(L, -2, "createWindow");
-    lua_pushcfunction(L, DestroyWindow);
-    lua_setfield(L, -2, "destroyWindow");
-    lua_pushcfunction(L, IsWindowOpen);
-    lua_setfield(L, -2, "isWindowOpen");
-    lua_pushcfunction(L, SetWindowOpen);
-    lua_setfield(L, -2, "setWindowOpen");
-    
-    // 窗口控制
-    lua_pushcfunction(L, Begin);
-    lua_setfield(L, -2, "begin");
-    lua_pushcfunction(L, End);
-    lua_setfield(L, -2, "end");
-    lua_pushcfunction(L, BeginChild);
-    lua_setfield(L, -2, "beginChild");
-    lua_pushcfunction(L, EndChild);
-    lua_setfield(L, -2, "endChild");
-    
-    // 文本和显示
-    lua_pushcfunction(L, Text);
-    lua_setfield(L, -2, "text");
-    lua_pushcfunction(L, TextColored);
-    lua_setfield(L, -2, "textColored");
-    lua_pushcfunction(L, TextWrapped);
-    lua_setfield(L, -2, "textWrapped");
-    lua_pushcfunction(L, Separator);
-    lua_setfield(L, -2, "separator");
-    lua_pushcfunction(L, Spacing);
-    lua_setfield(L, -2, "spacing");
-    lua_pushcfunction(L, NewLine);
-    lua_setfield(L, -2, "newLine");
-    
-    // 按钮和输入
-    lua_pushcfunction(L, Button);
-    lua_setfield(L, -2, "button");
-    lua_pushcfunction(L, SmallButton);
-    lua_setfield(L, -2, "smallButton");
-    lua_pushcfunction(L, Checkbox);
-    lua_setfield(L, -2, "checkbox");
-    lua_pushcfunction(L, InputText);
-    lua_setfield(L, -2, "inputText");
-    lua_pushcfunction(L, InputInt);
-    lua_setfield(L, -2, "inputInt");
-    lua_pushcfunction(L, InputFloat);
-    lua_setfield(L, -2, "inputFloat");
-    lua_pushcfunction(L, SliderInt);
-    lua_setfield(L, -2, "sliderInt");
-    lua_pushcfunction(L, SliderFloat);
-    lua_setfield(L, -2, "sliderFloat");
-    
-    // 布局
-    lua_pushcfunction(L, SameLine);
-    lua_setfield(L, -2, "sameLine");
-    lua_pushcfunction(L, Columns);
-    lua_setfield(L, -2, "columns");
-    lua_pushcfunction(L, NextColumn);
-    lua_setfield(L, -2, "nextColumn");
-    lua_pushcfunction(L, SetColumnWidth);
-    lua_setfield(L, -2, "setColumnWidth");
-    
-    // 树形和折叠
-    lua_pushcfunction(L, TreeNode);
-    lua_setfield(L, -2, "treeNode");
-    lua_pushcfunction(L, TreePop);
-    lua_setfield(L, -2, "treePop");
-    lua_pushcfunction(L, CollapsingHeader);
-    lua_setfield(L, -2, "collapsingHeader");
-    
-    // 列表和选择
-    lua_pushcfunction(L, Selectable);
-    lua_setfield(L, -2, "selectable");
-    lua_pushcfunction(L, ListBox);
-    lua_setfield(L, -2, "listBox");
-    
-    // 表格
-    lua_pushcfunction(L, BeginTable);
-    lua_setfield(L, -2, "beginTable");
-    lua_pushcfunction(L, EndTable);
-    lua_setfield(L, -2, "endTable");
-    lua_pushcfunction(L, TableNextRow);
-    lua_setfield(L, -2, "tableNextRow");
-    lua_pushcfunction(L, TableNextColumn);
-    lua_setfield(L, -2, "tableNextColumn");
-    lua_pushcfunction(L, TableSetColumnIndex);
-    lua_setfield(L, -2, "tableSetColumnIndex");
-    
-    // 其他
-    lua_pushcfunction(L, IsItemClicked);
-    lua_setfield(L, -2, "isItemClicked");
-    lua_pushcfunction(L, IsItemHovered);
-    lua_setfield(L, -2, "isItemHovered");
-    lua_pushcfunction(L, GetWindowSize);
-    lua_setfield(L, -2, "getWindowSize");
-    lua_pushcfunction(L, SetWindowSize);
-    lua_setfield(L, -2, "setWindowSize");
-    lua_pushcfunction(L, GetWindowPos);
-    lua_setfield(L, -2, "getWindowPos");
-    lua_pushcfunction(L, SetWindowPos);
-    lua_setfield(L, -2, "setWindowPos");
+
+    RegisterGuardedImGuiFunction(
+        L, "createWindow", CreateWindow, kGuiScriptMode);
+
+    constexpr unsigned frame = kGuiFrameMode;
+    RegisterGuardedImGuiFunction(L, "destroyWindow", DestroyWindow, frame);
+    RegisterGuardedImGuiFunction(L, "isWindowOpen", IsWindowOpen, frame);
+    RegisterGuardedImGuiFunction(L, "setWindowOpen", SetWindowOpen, frame);
+    RegisterGuardedImGuiFunction(L, "begin", Begin, frame);
+    RegisterGuardedImGuiFunction(L, "end", End, frame);
+    RegisterGuardedImGuiFunction(L, "beginChild", BeginChild, frame);
+    RegisterGuardedImGuiFunction(L, "endChild", EndChild, frame);
+    RegisterGuardedImGuiFunction(L, "text", Text, frame);
+    RegisterGuardedImGuiFunction(L, "textColored", TextColored, frame);
+    RegisterGuardedImGuiFunction(L, "textWrapped", TextWrapped, frame);
+    RegisterGuardedImGuiFunction(L, "separator", Separator, frame);
+    RegisterGuardedImGuiFunction(L, "spacing", Spacing, frame);
+    RegisterGuardedImGuiFunction(L, "newLine", NewLine, frame);
+    RegisterGuardedImGuiFunction(L, "button", Button, frame);
+    RegisterGuardedImGuiFunction(L, "smallButton", SmallButton, frame);
+    RegisterGuardedImGuiFunction(L, "checkbox", Checkbox, frame);
+    RegisterGuardedImGuiFunction(L, "inputText", InputText, frame);
+    RegisterGuardedImGuiFunction(L, "inputInt", InputInt, frame);
+    RegisterGuardedImGuiFunction(L, "inputFloat", InputFloat, frame);
+    RegisterGuardedImGuiFunction(L, "sliderInt", SliderInt, frame);
+    RegisterGuardedImGuiFunction(L, "sliderFloat", SliderFloat, frame);
+    RegisterGuardedImGuiFunction(L, "sameLine", SameLine, frame);
+    RegisterGuardedImGuiFunction(L, "columns", Columns, frame);
+    RegisterGuardedImGuiFunction(L, "nextColumn", NextColumn, frame);
+    RegisterGuardedImGuiFunction(L, "setColumnWidth", SetColumnWidth, frame);
+    RegisterGuardedImGuiFunction(L, "treeNode", TreeNode, frame);
+    RegisterGuardedImGuiFunction(L, "treePop", TreePop, frame);
+    RegisterGuardedImGuiFunction(
+        L, "collapsingHeader", CollapsingHeader, frame);
+    RegisterGuardedImGuiFunction(L, "selectable", Selectable, frame);
+    RegisterGuardedImGuiFunction(L, "listBox", ListBox, frame);
+    RegisterGuardedImGuiFunction(L, "beginTable", BeginTable, frame);
+    RegisterGuardedImGuiFunction(L, "endTable", EndTable, frame);
+    RegisterGuardedImGuiFunction(L, "tableNextRow", TableNextRow, frame);
+    RegisterGuardedImGuiFunction(
+        L, "tableNextColumn", TableNextColumn, frame);
+    RegisterGuardedImGuiFunction(
+        L, "tableSetColumnIndex", TableSetColumnIndex, frame);
+    RegisterGuardedImGuiFunction(L, "isItemClicked", IsItemClicked, frame);
+    RegisterGuardedImGuiFunction(L, "isItemHovered", IsItemHovered, frame);
+    RegisterGuardedImGuiFunction(L, "getWindowSize", GetWindowSize, frame);
+    RegisterGuardedImGuiFunction(L, "setWindowSize", SetWindowSize, frame);
+    RegisterGuardedImGuiFunction(L, "getWindowPos", GetWindowPos, frame);
+    RegisterGuardedImGuiFunction(L, "setWindowPos", SetWindowPos, frame);
     
     lua_setglobal(L, "imgui");
 }
@@ -265,9 +256,10 @@ int LuaAPI_ImGui::CreateWindow(lua_State* L) {
     
     auto* window = new LuaImGuiWindow(windowName, callbackName);
     int windowId = window->GetWindowId();
-    luaWindows[windowId] = window;
-    
-    Gui::addWindow(window);
+    Gui::postTask([window, windowId] {
+        luaWindows[windowId] = window;
+        Gui::addWindow(window);
+    });
     
     lua_pushinteger(L, windowId);
     return 1;

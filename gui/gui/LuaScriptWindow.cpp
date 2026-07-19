@@ -4,8 +4,10 @@
 #include "../imgui/imgui.h"
 #include <filesystem>
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <cfloat>
+#include <future>
 
 LuaScriptWindow::LuaScriptWindow(Mem::IMemService& service)
     : service_(service) {
@@ -19,9 +21,16 @@ unsigned int LuaScriptWindow::getWindowFlags() const
 }
 
 LuaScriptWindow::~LuaScriptWindow() {
+    if (scriptCancellation) {
+        scriptCancellation->store(true, std::memory_order_release);
+    }
+    if (scriptFuture.valid()) {
+        scriptFuture.wait();
+    }
 }
 
 void LuaScriptWindow::onDraw() {
+    pollScriptExecution();
     drawScriptControls();
     ImGui::Separator();
 
@@ -496,59 +505,110 @@ void LuaScriptWindow::executeScript(const std::string& filepath) {
         return;
     }
 
-    auto& engine = LuaEngine::GetInstance();
-    if (!engine.IsInitialized()) {
-        if (!engine.Initialize(service_)) {
-            outputLog.push_back("[错误] Lua引擎初始化失败: " + engine.GetLastError());
-            if (outputLog.size() > MAX_LOG_LINES) {
-                outputLog.erase(outputLog.begin());
-            }
-            return;
-        }
-    }
-
     scriptRunning = true;
+    stopRequested = false;
     currentScript = filepath;
+    completionSuccessMessage = "[成功] 脚本执行完成";
+    scriptCancellation = std::make_shared<std::atomic<bool>>(false);
     outputLog.push_back("[执行] " + std::filesystem::path(filepath).filename().string());
-
-    bool success = engine.ExecuteFile(filepath);
-    if (success) {
-        outputLog.push_back("[成功] 脚本执行完成");
-    } else {
-        outputLog.push_back("[错误] " + engine.GetLastError());
+    auto cancellation = scriptCancellation;
+    auto* service = &service_;
+    try {
+        scriptFuture = std::async(
+            std::launch::async,
+            [service, filepath, cancellation] {
+                auto& engine = LuaEngine::GetInstance();
+                LuaExecutionResult initialization = engine.Initialize(*service);
+                if (!initialization.success) {
+                    initialization.error =
+                        "Lua引擎初始化失败: " + initialization.error;
+                    return initialization;
+                }
+                return engine.ExecuteFile(filepath, cancellation);
+            });
+    } catch (const std::exception& e) {
+        outputLog.push_back("[错误] 无法启动脚本线程: " +
+                            std::string(e.what()));
+        scriptRunning = false;
+        currentScript.clear();
+        scriptCancellation.reset();
     }
-
-    // 限制日志行数
-    if (outputLog.size() > MAX_LOG_LINES) {
-        outputLog.erase(outputLog.begin(), outputLog.begin() + (outputLog.size() - MAX_LOG_LINES));
-    }
-
-    scriptRunning = false;
-    currentScript.clear();
 }
 
 void LuaScriptWindow::stopScript() {
-    // LuaJIT不支持直接停止正在执行的脚本
-    // 这里只能标记状态，实际停止需要在脚本中检查标志
-    scriptRunning = false;
-    outputLog.push_back("[停止] 脚本执行已停止");
+    if (!scriptRunning || !scriptCancellation || stopRequested) {
+        return;
+    }
+    stopRequested = true;
+    scriptCancellation->store(true, std::memory_order_release);
+    outputLog.push_back("[停止] 已请求停止脚本");
 }
 
 void LuaScriptWindow::reloadScript(const std::string& name) {
-    auto& engine = LuaEngine::GetInstance();
-    if (!engine.IsInitialized()) {
+    if (scriptRunning) {
         return;
     }
 
-    bool success = engine.ReloadScript(name);
-    if (success) {
-        outputLog.push_back("[重载] " + name + " 已重新加载");
-    } else {
-        outputLog.push_back("[错误] 重载失败: " + engine.GetLastError());
+    scriptRunning = true;
+    stopRequested = false;
+    currentScript = name;
+    completionSuccessMessage = "[重载] " + name + " 已重新加载";
+    scriptCancellation = std::make_shared<std::atomic<bool>>(false);
+    outputLog.push_back("[重载] " + name);
+    auto cancellation = scriptCancellation;
+    auto* service = &service_;
+    try {
+        scriptFuture = std::async(
+            std::launch::async,
+            [service, name, cancellation] {
+                auto& engine = LuaEngine::GetInstance();
+                LuaExecutionResult initialization = engine.Initialize(*service);
+                if (!initialization.success) {
+                    initialization.error =
+                        "Lua引擎初始化失败: " + initialization.error;
+                    return initialization;
+                }
+                return engine.ReloadScript(name, cancellation);
+            });
+    } catch (const std::exception& e) {
+        outputLog.push_back("[错误] 无法启动脚本线程: " +
+                            std::string(e.what()));
+        scriptRunning = false;
+        currentScript.clear();
+        scriptCancellation.reset();
+    }
+}
+
+void LuaScriptWindow::pollScriptExecution() {
+    if (!scriptRunning || !scriptFuture.valid() ||
+        scriptFuture.wait_for(std::chrono::milliseconds(0)) !=
+            std::future_status::ready) {
+        return;
+    }
+
+    try {
+        const LuaExecutionResult result = scriptFuture.get();
+        if (result.success) {
+            outputLog.push_back(completionSuccessMessage);
+        } else if (stopRequested &&
+                   result.error == "Lua execution cancelled") {
+            outputLog.push_back("[停止] 脚本执行已停止");
+        } else {
+            outputLog.push_back("[错误] " + result.error);
+        }
+    } catch (const std::exception& e) {
+        outputLog.push_back("[错误] 脚本线程异常: " + std::string(e.what()));
+    } catch (...) {
+        outputLog.push_back("[错误] 脚本线程发生未知异常");
     }
 
     if (outputLog.size() > MAX_LOG_LINES) {
         outputLog.erase(outputLog.begin(), outputLog.begin() + (outputLog.size() - MAX_LOG_LINES));
     }
+    scriptRunning = false;
+    stopRequested = false;
+    currentScript.clear();
+    completionSuccessMessage.clear();
+    scriptCancellation.reset();
 }
 

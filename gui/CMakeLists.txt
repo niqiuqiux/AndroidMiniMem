@@ -318,6 +318,39 @@ if(BUILD_TESTING)
     add_test(NAME minimem_socket_safety
              COMMAND minimem_socket_safety_tests)
 
+    if(HAVE_LUAJIT)
+        add_executable(minimem_lua_sandbox_tests
+            tests/LuaSandboxTests.cpp
+            imgui/imgui.cpp
+            imgui/imgui_draw.cpp
+            imgui/imgui_tables.cpp
+            imgui/imgui_widgets.cpp
+            gui/DisassemblyHelper.cpp
+            gui/AssemblyHelper.cpp
+            gui/LuaImGuiWindow.cpp
+            ${LUA_SOURCES}
+        )
+        target_include_directories(minimem_lua_sandbox_tests PRIVATE
+            imgui gui lua mem socket
+            ${CMAKE_SOURCE_DIR}/third_party
+            ${LUAJIT_INCLUDE}
+        )
+        target_compile_definitions(minimem_lua_sandbox_tests PRIVATE
+            HAVE_LUAJIT IMGUI_DISABLE_DEBUG_TOOLS)
+        if(LUAJIT_IS_STATIC)
+            target_compile_definitions(minimem_lua_sandbox_tests PRIVATE
+                LUAJIT_STATIC)
+        endif()
+        if(MSVC)
+            target_compile_options(minimem_lua_sandbox_tests PRIVATE /utf-8)
+        endif()
+        target_link_libraries(minimem_lua_sandbox_tests PRIVATE
+            ${LUAJIT_LIBRARY})
+        add_test(NAME minimem_lua_sandbox
+                 COMMAND minimem_lua_sandbox_tests)
+        set_tests_properties(minimem_lua_sandbox PROPERTIES TIMEOUT 10)
+    endif()
+
     add_test(
         NAME minimem_mem_service_boundary
         COMMAND ${CMAKE_COMMAND}

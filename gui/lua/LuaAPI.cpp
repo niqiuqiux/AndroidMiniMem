@@ -5,6 +5,7 @@
 #include "../mem/IMemService.h"
 #include "../socket/socket_io_timeout.h"
 #include "../gui/Gui.h"
+#include <atomic>
 #include <string>
 #include <vector>
 #include <thread>
@@ -558,27 +559,53 @@ int LuaAPI::Sleep(lua_State* L) {
         return 0;
     }
     int milliseconds = static_cast<int>(rawMilliseconds);
-    if (!SocketIoTimeout::HasThreadTimeout()) {
+    Mem::OperationContext* operation = BoundOperationContext(L);
+    std::atomic<bool>* cancellation =
+        operation && operation->cancellation
+            ? operation->cancellation.get()
+            : nullptr;
+    const auto deadline = operation
+        ? operation->deadline
+        : SocketIoTimeout::GetThreadDeadline();
+    const bool hasDeadline = deadline !=
+        (std::chrono::steady_clock::time_point::max)();
+
+    if (!cancellation && !hasDeadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
         return 0;
     }
 
     int remainingSleepMs = milliseconds;
     while (remainingSleepMs > 0) {
-        if (SocketIoTimeout::IsThreadTimeoutExpired()) {
+        if (cancellation && cancellation->load(std::memory_order_acquire)) {
+            luaL_error(L, "Lua execution cancelled");
+            return 0;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (hasDeadline && now >= deadline) {
             luaL_error(L, "Lua execution timed out");
             return 0;
         }
 
-        const DWORD remainingTimeoutMs = SocketIoTimeout::GetRemainingTimeoutMs();
-        const int sliceMs = (std::min)(
-            remainingSleepMs,
-            (std::min)(kLuaSleepPollMs, static_cast<int>(remainingTimeoutMs)));
+        int sliceMs = (std::min)(remainingSleepMs, kLuaSleepPollMs);
+        if (hasDeadline) {
+            auto remainingDeadlineMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - now).count();
+            if (remainingDeadlineMs <= 0) {
+                remainingDeadlineMs = 1;
+            }
+            sliceMs = (std::min)(
+                sliceMs, static_cast<int>(remainingDeadlineMs));
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(sliceMs));
         remainingSleepMs -= sliceMs;
     }
 
-    if (SocketIoTimeout::IsThreadTimeoutExpired()) {
+    if (cancellation && cancellation->load(std::memory_order_acquire)) {
+        luaL_error(L, "Lua execution cancelled");
+    }
+    if (hasDeadline && std::chrono::steady_clock::now() >= deadline) {
         luaL_error(L, "Lua execution timed out");
     }
     return 0;

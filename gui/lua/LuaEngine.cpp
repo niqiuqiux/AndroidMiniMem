@@ -1,21 +1,20 @@
 #include "LuaEngine.h"
 #include "LuaAPI.h"
 #include "../mem/IMemService.h"
-#include <fstream>
-#include <sstream>
-#include <filesystem>
-#include <iostream>
+
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
+#include <new>
+#include <utility>
 
 #ifdef HAVE_LUAJIT
-// LuaJIT使用lua.hpp（已包含所有头文件）
 extern "C" {
 #include "lua.hpp"
+#include "luajit.h"
 }
 #else
-// 标准Lua需要单独包含
 extern "C" {
 #include <lua.h>
 #include <lauxlib.h>
@@ -26,13 +25,17 @@ extern "C" {
 namespace {
 
 constexpr size_t kMaxCapturedOutputBytes = 1024 * 1024;
-constexpr int kLuaTimeoutInstructionInterval = 10000;
+constexpr int kLuaHookInstructionInterval = 10000;
+constexpr int kLuaGuiCallbackTimeoutMs = 250;
 
-char g_luaTimeoutRegistryKey;
+char g_luaExecutionControlRegistryKey;
+char g_luaExecutionModeRegistryKey;
 
-struct LuaTimeoutContext {
-    std::chrono::steady_clock::time_point deadline;
-    bool expired = false;
+struct LuaExecutionControl {
+    LuaEngine::Deadline deadline = (LuaEngine::Deadline::max)();
+    Mem::CancellationToken cancellation;
+    bool timedOut = false;
+    bool cancelled = false;
 };
 
 struct LuaCaptureContext {
@@ -40,14 +43,80 @@ struct LuaCaptureContext {
     bool truncated = false;
 };
 
+LuaExecutionResult Success() {
+    return {true, false, {}};
+}
+
+LuaExecutionResult Failure(std::string error) {
+    return {false, false, std::move(error)};
+}
+
+LuaExecutionResult Busy() {
+    return {false, true, {}};
+}
+
+LuaExecutionResult LockTimeout() {
+    return Failure("Lua execution timed out while waiting for the engine");
+}
+
+bool AcquireLock(std::unique_lock<std::timed_mutex>& lock,
+                 LuaEngine::Deadline deadline) {
+    if (deadline == (LuaEngine::Deadline::max)()) {
+        lock.lock();
+        return true;
+    }
+    if (LuaEngine::Clock::now() >= deadline) {
+        return false;
+    }
+    return lock.try_lock_until(deadline);
+}
+
+bool DeadlineExpired(LuaEngine::Deadline deadline) {
+    return deadline != (LuaEngine::Deadline::max)() &&
+           LuaEngine::Clock::now() >= deadline;
+}
+
+bool PrepareInterruptibleChunk(lua_State* state,
+                               int chunkIndex,
+                               bool interruptible) {
+    if (!interruptible) {
+        return true;
+    }
+#ifdef HAVE_LUAJIT
+    // LuaJIT 的已编译紧循环不会可靠触发计数 hook，因此带超时或取消能力的
+    // chunk 及其子函数必须保持解释执行。
+    return luaJIT_setmode(
+               state, chunkIndex,
+               LUAJIT_MODE_ALLFUNC | LUAJIT_MODE_OFF) != 0;
+#else
+    (void)state;
+    (void)chunkIndex;
+    return true;
+#endif
+}
+
+class LuaStackGuard {
+public:
+    explicit LuaStackGuard(lua_State* state)
+        : state_(state), top_(lua_gettop(state)) {}
+
+    ~LuaStackGuard() {
+        lua_settop(state_, top_);
+    }
+
+private:
+    lua_State* state_ = nullptr;
+    int top_ = 0;
+};
+
 class LuaOperationBinding {
 public:
-    LuaOperationBinding(
-        lua_State* state,
-        Mem::IMemService& service,
-        std::chrono::steady_clock::time_point deadline =
-            (std::chrono::steady_clock::time_point::max)())
+    LuaOperationBinding(lua_State* state,
+                        Mem::IMemService& service,
+                        const Mem::CancellationToken& cancellation,
+                        LuaEngine::Deadline deadline)
         : state_(state), context_(service.captureContext(true)) {
+        context_.cancellation = cancellation;
         context_.deadline = deadline;
         previous_ = LuaAPI::BindOperationContext(state_, &context_);
     }
@@ -65,44 +134,267 @@ private:
     Mem::OperationContext* previous_ = nullptr;
 };
 
-void LuaTimeoutHook(lua_State* L, lua_Debug*) {
-    lua_pushlightuserdata(L, &g_luaTimeoutRegistryKey);
-    lua_gettable(L, LUA_REGISTRYINDEX);
-    LuaTimeoutContext* ctx =
-        static_cast<LuaTimeoutContext*>(lua_touserdata(L, -1));
-    lua_pop(L, 1);
+void SetExecutionMode(lua_State* state, LuaEngine::ExecutionMode mode) {
+    lua_pushlightuserdata(state, &g_luaExecutionModeRegistryKey);
+    lua_pushinteger(state, static_cast<lua_Integer>(mode));
+    lua_settable(state, LUA_REGISTRYINDEX);
+}
 
-    if (!ctx) {
-        return;
+class LuaExecutionModeBinding {
+public:
+    LuaExecutionModeBinding(lua_State* state, LuaEngine::ExecutionMode mode)
+        : state_(state), previous_(LuaEngine::CurrentExecutionMode(state)) {
+        SetExecutionMode(state_, mode);
     }
 
-    if (std::chrono::steady_clock::now() >= ctx->deadline) {
-        ctx->expired = true;
-        luaL_error(L, "Lua execution timed out");
+    ~LuaExecutionModeBinding() {
+        SetExecutionMode(state_, previous_);
+    }
+
+private:
+    lua_State* state_ = nullptr;
+    LuaEngine::ExecutionMode previous_ = LuaEngine::ExecutionMode::None;
+};
+
+void LuaExecutionHook(lua_State* state, lua_Debug*) {
+    lua_pushlightuserdata(state, &g_luaExecutionControlRegistryKey);
+    lua_gettable(state, LUA_REGISTRYINDEX);
+    auto* control = static_cast<LuaExecutionControl*>(
+        lua_touserdata(state, -1));
+    lua_pop(state, 1);
+
+    if (!control) {
+        return;
+    }
+    if (control->cancellation &&
+        control->cancellation->load(std::memory_order_acquire)) {
+        control->cancelled = true;
+        luaL_error(state, "Lua execution cancelled");
+        return;
+    }
+    if (DeadlineExpired(control->deadline)) {
+        control->timedOut = true;
+        luaL_error(state, "Lua execution timed out");
     }
 }
 
-void AppendCapturedOutput(LuaCaptureContext* ctx, const char* text) {
-    if (!ctx || !ctx->output || !text || ctx->truncated) {
+class LuaHookBinding {
+public:
+    LuaHookBinding(lua_State* state, LuaExecutionControl& control)
+        : state_(state) {
+        if (control.deadline == (LuaEngine::Deadline::max)() &&
+            !control.cancellation) {
+            return;
+        }
+
+        enabled_ = true;
+        previousHook_ = lua_gethook(state_);
+        previousMask_ = lua_gethookmask(state_);
+        previousCount_ = lua_gethookcount(state_);
+
+        lua_pushlightuserdata(state_, &g_luaExecutionControlRegistryKey);
+        lua_gettable(state_, LUA_REGISTRYINDEX);
+        previousControl_ = lua_touserdata(state_, -1);
+        lua_pop(state_, 1);
+
+        lua_pushlightuserdata(state_, &g_luaExecutionControlRegistryKey);
+        lua_pushlightuserdata(state_, &control);
+        lua_settable(state_, LUA_REGISTRYINDEX);
+        lua_sethook(state_, LuaExecutionHook, LUA_MASKCOUNT,
+                    kLuaHookInstructionInterval);
+    }
+
+    ~LuaHookBinding() {
+        if (!enabled_) {
+            return;
+        }
+        lua_sethook(state_, previousHook_, previousMask_, previousCount_);
+        lua_pushlightuserdata(state_, &g_luaExecutionControlRegistryKey);
+        if (previousControl_) {
+            lua_pushlightuserdata(state_, previousControl_);
+        } else {
+            lua_pushnil(state_);
+        }
+        lua_settable(state_, LUA_REGISTRYINDEX);
+    }
+
+private:
+    lua_State* state_ = nullptr;
+    lua_Hook previousHook_ = nullptr;
+    int previousMask_ = 0;
+    int previousCount_ = 0;
+    void* previousControl_ = nullptr;
+    bool enabled_ = false;
+};
+
+class LuaCaptureDeactivation {
+public:
+    explicit LuaCaptureDeactivation(LuaCaptureContext* context)
+        : context_(context) {}
+
+    ~LuaCaptureDeactivation() {
+        if (context_) {
+            context_->output = nullptr;
+        }
+    }
+
+private:
+    LuaCaptureContext* context_ = nullptr;
+};
+
+void AppendCapturedOutput(LuaCaptureContext* context,
+                          const char* text,
+                          size_t length) {
+    if (!context || !context->output || !text || context->truncated) {
         return;
     }
 
-    const size_t remaining =
-        kMaxCapturedOutputBytes > ctx->output->size()
-            ? kMaxCapturedOutputBytes - ctx->output->size()
-            : 0;
+    const size_t current = context->output->size();
+    const size_t remaining = current < kMaxCapturedOutputBytes
+        ? kMaxCapturedOutputBytes - current
+        : 0;
     if (remaining == 0) {
-        ctx->truncated = true;
-        ctx->output->append("\n[output truncated]\n");
+        context->truncated = true;
+        context->output->append("\n[output truncated]\n");
         return;
     }
 
-    const size_t len = std::strlen(text);
-    ctx->output->append(text, (std::min)(len, remaining));
-    if (len > remaining) {
-        ctx->truncated = true;
-        ctx->output->append("\n[output truncated]\n");
+    const size_t copied = (std::min)(length, remaining);
+    context->output->append(text, copied);
+    if (copied != length) {
+        context->truncated = true;
+        context->output->append("\n[output truncated]\n");
     }
+}
+
+void AppendCapturedOutput(LuaCaptureContext* context, const char* text) {
+    AppendCapturedOutput(context, text, std::strlen(text));
+}
+
+int CapturePrint(lua_State* state) {
+    auto* capture = static_cast<LuaCaptureContext*>(
+        lua_touserdata(state, lua_upvalueindex(1)));
+    const int count = lua_gettop(state);
+    for (int index = 1; index <= count; ++index) {
+        if (index > 1) {
+            AppendCapturedOutput(capture, "\t");
+        }
+
+        size_t length = 0;
+        const char* value = lua_tolstring(state, index, &length);
+        if (value) {
+            AppendCapturedOutput(capture, value, length);
+        } else if (lua_isnil(state, index)) {
+            AppendCapturedOutput(capture, "nil");
+        } else if (lua_isboolean(state, index)) {
+            AppendCapturedOutput(
+                capture, lua_toboolean(state, index) ? "true" : "false");
+        } else {
+            AppendCapturedOutput(
+                capture, lua_typename(state, lua_type(state, index)));
+        }
+    }
+    AppendCapturedOutput(capture, "\n");
+    return 0;
+}
+
+int AbsoluteIndex(lua_State* state, int index) {
+    return index < 0 ? lua_gettop(state) + index + 1 : index;
+}
+
+void PushShallowTableCopy(lua_State* state, int sourceIndex) {
+    sourceIndex = AbsoluteIndex(state, sourceIndex);
+    lua_newtable(state);
+    const int copyIndex = lua_gettop(state);
+    lua_pushnil(state);
+    while (lua_next(state, sourceIndex) != 0) {
+        lua_pushvalue(state, -2);
+        lua_pushvalue(state, -2);
+        lua_settable(state, copyIndex);
+        lua_pop(state, 1);
+    }
+}
+
+void CopyGlobalValue(lua_State* state, int environmentIndex, const char* name) {
+    lua_getglobal(state, name);
+    if (lua_isnil(state, -1)) {
+        lua_pop(state, 1);
+        return;
+    }
+    lua_setfield(state, environmentIndex, name);
+}
+
+void CopyGlobalTable(lua_State* state, int environmentIndex, const char* name) {
+    lua_getglobal(state, name);
+    if (!lua_istable(state, -1)) {
+        lua_pop(state, 1);
+        return;
+    }
+    PushShallowTableCopy(state, -1);
+    lua_setfield(state, environmentIndex, name);
+    lua_pop(state, 1);
+}
+
+LuaCaptureContext* PushIpcEnvironment(lua_State* state,
+                                      std::string& output) {
+    lua_newtable(state);
+    const int environmentIndex = lua_gettop(state);
+
+    constexpr const char* kSafeBaseValues[] = {
+        "_VERSION", "assert", "error", "ipairs", "next", "pairs",
+        "pcall", "rawequal", "rawget", "rawset", "select", "setmetatable",
+        "tonumber", "tostring", "type", "unpack", "xpcall",
+        "log", "sleep", "time",
+    };
+    for (const char* name : kSafeBaseValues) {
+        CopyGlobalValue(state, environmentIndex, name);
+    }
+
+    constexpr const char* kAllowedLibraryTables[] = {
+        "math", "string", "table", "bit", "os", "io",
+    };
+    for (const char* name : kAllowedLibraryTables) {
+        CopyGlobalTable(state, environmentIndex, name);
+    }
+
+    constexpr const char* kMiniMemApiTables[] = {
+        "mem", "process", "module", "bp", "asm",
+    };
+    for (const char* name : kMiniMemApiTables) {
+        CopyGlobalTable(state, environmentIndex, name);
+    }
+
+    lua_pushvalue(state, environmentIndex);
+    lua_setfield(state, environmentIndex, "_G");
+
+    void* storage = lua_newuserdata(state, sizeof(LuaCaptureContext));
+    auto* capture = new (storage) LuaCaptureContext{&output, false};
+    lua_pushcclosure(state, CapturePrint, 1);
+    lua_setfield(state, environmentIndex, "print");
+    return capture;
+}
+
+std::string ExecutionInterruptionMessage(
+    const LuaExecutionControl& control) {
+    if (control.cancelled ||
+        (control.cancellation &&
+         control.cancellation->load(std::memory_order_acquire))) {
+        return "Lua execution cancelled";
+    }
+    if (control.timedOut || DeadlineExpired(control.deadline)) {
+        return "Lua execution timed out";
+    }
+    return {};
+}
+
+std::string ExecutionFailureMessage(const LuaExecutionControl& control,
+                                    std::string luaError) {
+    const std::string interruption =
+        ExecutionInterruptionMessage(control);
+    if (!interruption.empty()) {
+        return interruption;
+    }
+    return luaError;
 }
 
 } // namespace
@@ -112,48 +404,45 @@ LuaEngine& LuaEngine::GetInstance() {
     return instance;
 }
 
-bool LuaEngine::Initialize(Mem::IMemService& service) {
-    std::lock_guard<std::mutex> lock(mutex);
-    
+LuaExecutionResult LuaEngine::Initialize(Mem::IMemService& service,
+                                         Deadline deadline) {
+    std::unique_lock<std::timed_mutex> lock(mutex, std::defer_lock);
+    if (!AcquireLock(lock, deadline)) {
+        return LockTimeout();
+    }
+
     if (initialized) {
         if (memService_ == &service) {
-            return true;
+            return Success();
         }
-        lastError = "Lua engine is already bound to another memory service";
-        return false;
+        return Failure("Lua engine is already bound to another memory service");
+    }
+    if (DeadlineExpired(deadline)) {
+        return LockTimeout();
     }
 
-    // 创建Lua状态机
     L = luaL_newstate();
     if (!L) {
-        lastError = "Failed to create Lua state";
-        return false;
+        return Failure("Failed to create Lua state");
     }
 
-    // 注册标准库
     RegisterStandardLibs();
-    
-    // 注册自定义API
     memService_ = &service;
     RegisterAPIs();
-
+    AddScriptPathLocked(scriptBasePath);
     initialized = true;
-    return true;
+    return Success();
 }
 
 void LuaEngine::Shutdown() {
-    std::lock_guard<std::mutex> lock(mutex);
-    
+    std::lock_guard<std::timed_mutex> lock(mutex);
     if (L) {
         lua_close(L);
         L = nullptr;
     }
-    
     initialized = false;
     memService_ = nullptr;
     loadedScripts.clear();
-    callbacks.clear();
-    lastError.clear();
 }
 
 LuaEngine::~LuaEngine() {
@@ -161,291 +450,342 @@ LuaEngine::~LuaEngine() {
 }
 
 void LuaEngine::RegisterStandardLibs() {
-    if (!L) return;
-    
-    // 打开标准库（LuaJIT和标准Lua都支持）
-    luaL_openlibs(L);
+    if (L) {
+        luaL_openlibs(L);
+    }
 }
 
 void LuaEngine::RegisterAPIs() {
-    if (!L) return;
-    
-    // 注册所有自定义API
-    LuaAPI::RegisterAll(L, *memService_);
+    if (L && memService_) {
+        LuaAPI::RegisterAll(L, *memService_);
+    }
 }
 
-bool LuaEngine::ExecuteFile(const std::string& filepath) {
-    std::lock_guard<std::mutex> lock(mutex);
-    return ExecuteFileLocked(filepath);
+LuaExecutionResult LuaEngine::ExecuteFile(
+    const std::string& filepath,
+    Mem::CancellationToken cancellation,
+    Deadline deadline) {
+    std::unique_lock<std::timed_mutex> lock(mutex, std::defer_lock);
+    if (!AcquireLock(lock, deadline)) {
+        return LockTimeout();
+    }
+    return ExecuteFileLocked(filepath, cancellation, deadline);
 }
 
-bool LuaEngine::ExecuteFileLocked(const std::string& filepath) {
-    if (!initialized || !L) {
-        lastError = "Lua engine not initialized";
-        return false;
+LuaExecutionResult LuaEngine::ExecuteFileLocked(
+    const std::string& filepath,
+    const Mem::CancellationToken& cancellation,
+    Deadline deadline) {
+    if (!initialized || !L || !memService_) {
+        return Failure("Lua engine not initialized");
+    }
+    if (cancellation &&
+        cancellation->load(std::memory_order_acquire)) {
+        return Failure("Lua execution cancelled");
+    }
+    if (DeadlineExpired(deadline)) {
+        return Failure("Lua execution timed out");
     }
 
-    // 检查文件是否存在
-    if (!std::filesystem::exists(filepath)) {
-        lastError = "File not found: " + filepath;
-        return false;
+    std::error_code filesystemError;
+    if (!std::filesystem::exists(filepath, filesystemError)) {
+        if (filesystemError) {
+            return Failure("Failed to inspect Lua file: " +
+                           filesystemError.message());
+        }
+        return Failure("File not found: " + filepath);
     }
 
-    // 加载并执行文件
+    LuaStackGuard stackGuard(L);
     int result = luaL_loadfile(L, filepath.c_str());
     if (result != LUA_OK) {
-        lastError = GetLuaError(L);
-        return false;
+        return Failure(GetLuaError(L));
+    }
+    if (!PrepareInterruptibleChunk(
+            L, -1,
+            cancellation || deadline != (Deadline::max)())) {
+        return Failure("Failed to make Lua chunk interruptible");
+    }
+    if (cancellation &&
+        cancellation->load(std::memory_order_acquire)) {
+        return Failure("Lua execution cancelled");
+    }
+    if (DeadlineExpired(deadline)) {
+        return Failure("Lua execution timed out");
     }
 
-    // 执行代码
-    LuaOperationBinding operation(L, *memService_);
+    LuaExecutionControl control{deadline, cancellation};
+    LuaExecutionModeBinding mode(L, ExecutionMode::GuiScript);
+    LuaOperationBinding operation(L, *memService_, cancellation, deadline);
+    LuaHookBinding hook(L, control);
     result = lua_pcall(L, 0, 0, 0);
     if (result != LUA_OK) {
-        lastError = GetLuaError(L);
-        return false;
+        return Failure(ExecutionFailureMessage(control, GetLuaError(L)));
+    }
+    const std::string interruption =
+        ExecutionInterruptionMessage(control);
+    if (!interruption.empty()) {
+        return Failure(interruption);
     }
 
-    // 记录已加载的脚本
-    std::string filename = std::filesystem::path(filepath).filename().string();
+    const std::string filename =
+        std::filesystem::path(filepath).filename().string();
     loadedScripts[filename] = filepath;
-
-    return true;
+    return Success();
 }
 
-bool LuaEngine::ExecuteString(const std::string& code) {
-    return ExecuteString(code, "=string");
+LuaExecutionResult LuaEngine::ExecuteString(
+    const std::string& code,
+    const std::string& chunkName,
+    Mem::CancellationToken cancellation,
+    Deadline deadline) {
+    std::unique_lock<std::timed_mutex> lock(mutex, std::defer_lock);
+    if (!AcquireLock(lock, deadline)) {
+        return LockTimeout();
+    }
+    return ExecuteStringLocked(code, chunkName, cancellation, deadline);
 }
 
-bool LuaEngine::ExecuteString(const std::string& code, const std::string& chunkName) {
-    std::lock_guard<std::mutex> lock(mutex);
-    
-    if (!initialized || !L) {
-        lastError = "Lua engine not initialized";
-        return false;
+LuaExecutionResult LuaEngine::ExecuteStringLocked(
+    const std::string& code,
+    const std::string& chunkName,
+    const Mem::CancellationToken& cancellation,
+    Deadline deadline) {
+    if (!initialized || !L || !memService_) {
+        return Failure("Lua engine not initialized");
+    }
+    if (cancellation &&
+        cancellation->load(std::memory_order_acquire)) {
+        return Failure("Lua execution cancelled");
+    }
+    if (DeadlineExpired(deadline)) {
+        return Failure("Lua execution timed out");
     }
 
-    // 加载代码
-    int result = luaL_loadbuffer(L, code.c_str(), code.length(), chunkName.c_str());
+    LuaStackGuard stackGuard(L);
+    int result = luaL_loadbuffer(
+        L, code.data(), code.size(), chunkName.c_str());
     if (result != LUA_OK) {
-        lastError = GetLuaError(L);
-        return false;
+        return Failure(GetLuaError(L));
+    }
+    if (!PrepareInterruptibleChunk(
+            L, -1,
+            cancellation || deadline != (Deadline::max)())) {
+        return Failure("Failed to make Lua chunk interruptible");
+    }
+    if (cancellation &&
+        cancellation->load(std::memory_order_acquire)) {
+        return Failure("Lua execution cancelled");
+    }
+    if (DeadlineExpired(deadline)) {
+        return Failure("Lua execution timed out");
     }
 
-    // 执行代码
-    LuaOperationBinding operation(L, *memService_);
+    LuaExecutionControl control{deadline, cancellation};
+    LuaExecutionModeBinding mode(L, ExecutionMode::GuiScript);
+    LuaOperationBinding operation(L, *memService_, cancellation, deadline);
+    LuaHookBinding hook(L, control);
     result = lua_pcall(L, 0, 0, 0);
     if (result != LUA_OK) {
-        lastError = GetLuaError(L);
-        return false;
+        return Failure(ExecutionFailureMessage(control, GetLuaError(L)));
     }
-
-    return true;
+    const std::string interruption =
+        ExecutionInterruptionMessage(control);
+    if (!interruption.empty()) {
+        return Failure(interruption);
+    }
+    return Success();
 }
 
-bool LuaEngine::ExecuteStringCapture(const std::string& code,
-                                     const std::string& chunkName,
-                                     std::string& output,
-                                     int timeoutMs) {
-    std::lock_guard<std::mutex> lock(mutex);
-
-    if (!initialized || !L) {
-        lastError = "Lua engine not initialized";
-        return false;
+LuaExecutionResult LuaEngine::ExecuteStringCapture(
+    const std::string& code,
+    const std::string& chunkName,
+    std::string& output,
+    Deadline deadline) {
+    output.clear();
+    std::unique_lock<std::timed_mutex> lock(mutex, std::defer_lock);
+    if (!AcquireLock(lock, deadline)) {
+        return LockTimeout();
+    }
+    if (!initialized || !L || !memService_) {
+        return Failure("Lua engine not initialized");
+    }
+    if (DeadlineExpired(deadline)) {
+        return Failure("Lua execution timed out");
     }
 
-    // 保存原始 print
-    lua_getglobal(L, "print");
-    int printRef = luaL_ref(L, LUA_REGISTRYINDEX);
-
-    LuaCaptureContext captureContext{&output, false};
-
-    // 设置捕获 print → 写入 output
-    lua_pushlightuserdata(L, &captureContext);
-    lua_pushcclosure(L, [](lua_State* L) -> int {
-        LuaCaptureContext* capture =
-            static_cast<LuaCaptureContext*>(lua_touserdata(L, lua_upvalueindex(1)));
-        int n = lua_gettop(L);
-        for (int i = 1; i <= n; i++) {
-            if (i > 1) AppendCapturedOutput(capture, "\t");
-            const char* s = lua_tostring(L, i);
-            if (s) AppendCapturedOutput(capture, s);
-        }
-        AppendCapturedOutput(capture, "\n");
-        return 0;
-    }, 1);
-    lua_setglobal(L, "print");
-
-    // 加载并执行代码
-    int result = luaL_loadbuffer(L, code.c_str(), code.length(), chunkName.c_str());
+    LuaStackGuard stackGuard(L);
+    int result = luaL_loadbuffer(
+        L, code.data(), code.size(), chunkName.c_str());
     if (result != LUA_OK) {
-        lastError = GetLuaError(L);
-        // 恢复原始 print
-        lua_rawgeti(L, LUA_REGISTRYINDEX, printRef);
-        lua_setglobal(L, "print");
-        luaL_unref(L, LUA_REGISTRYINDEX, printRef);
-        return false;
+        return Failure(GetLuaError(L));
     }
 
-    LuaTimeoutContext timeoutContext{};
-    lua_Hook previousHook = nullptr;
-    int previousHookMask = 0;
-    int previousHookCount = 0;
-    const bool useTimeout = timeoutMs > 0;
-    if (useTimeout) {
-        timeoutContext.deadline =
-            std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
-        previousHook = lua_gethook(L);
-        previousHookMask = lua_gethookmask(L);
-        previousHookCount = lua_gethookcount(L);
-
-        lua_pushlightuserdata(L, &g_luaTimeoutRegistryKey);
-        lua_pushlightuserdata(L, &timeoutContext);
-        lua_settable(L, LUA_REGISTRYINDEX);
-        lua_sethook(L, LuaTimeoutHook, LUA_MASKCOUNT, kLuaTimeoutInstructionInterval);
+    const int chunkIndex = lua_gettop(L);
+    if (!PrepareInterruptibleChunk(L, chunkIndex, true)) {
+        return Failure("Failed to make IPC Lua chunk interruptible");
+    }
+    LuaCaptureContext* capture = PushIpcEnvironment(L, output);
+    LuaCaptureDeactivation deactivateCapture(capture);
+    if (lua_setfenv(L, chunkIndex) == 0) {
+        return Failure("Failed to create IPC Lua environment");
+    }
+    if (DeadlineExpired(deadline)) {
+        return Failure("Lua execution timed out");
     }
 
-    const auto operationDeadline = useTimeout
-        ? timeoutContext.deadline
-        : (std::chrono::steady_clock::time_point::max)();
-    LuaOperationBinding operation(L, *memService_, operationDeadline);
+    LuaExecutionControl control{deadline, {}};
+    LuaExecutionModeBinding mode(L, ExecutionMode::Ipc);
+    LuaOperationBinding operation(L, *memService_, {}, deadline);
+    LuaHookBinding hook(L, control);
     result = lua_pcall(L, 0, 0, 0);
-    bool ok = (result == LUA_OK);
-    if (!ok) {
-        lastError = GetLuaError(L);
-        if (timeoutContext.expired) {
-            lastError = "Lua execution timed out";
-        }
+    capture->output = nullptr;
+    if (result != LUA_OK) {
+        return Failure(ExecutionFailureMessage(control, GetLuaError(L)));
     }
-
-    if (useTimeout) {
-        lua_sethook(L, previousHook, previousHookMask, previousHookCount);
-        lua_pushlightuserdata(L, &g_luaTimeoutRegistryKey);
-        lua_pushnil(L);
-        lua_settable(L, LUA_REGISTRYINDEX);
+    const std::string interruption =
+        ExecutionInterruptionMessage(control);
+    if (!interruption.empty()) {
+        return Failure(interruption);
     }
-
-    // 恢复原始 print
-    lua_rawgeti(L, LUA_REGISTRYINDEX, printRef);
-    lua_setglobal(L, "print");
-    luaL_unref(L, LUA_REGISTRYINDEX, printRef);
-
-    return ok;
+    return Success();
 }
 
-bool LuaEngine::ReloadScript(const std::string& name) {
-    std::lock_guard<std::mutex> lock(mutex);
-    
-    auto it = loadedScripts.find(name);
-    if (it == loadedScripts.end()) {
-        lastError = "Script not loaded: " + name;
-        return false;
+LuaExecutionResult LuaEngine::ReloadScript(
+    const std::string& name,
+    Mem::CancellationToken cancellation,
+    Deadline deadline) {
+    std::unique_lock<std::timed_mutex> lock(mutex, std::defer_lock);
+    if (!AcquireLock(lock, deadline)) {
+        return LockTimeout();
     }
-
-    std::string filepath = it->second;
-    return ExecuteFileLocked(filepath);
+    const auto found = loadedScripts.find(name);
+    if (found == loadedScripts.end()) {
+        return Failure("Script not loaded: " + name);
+    }
+    return ExecuteFileLocked(found->second, cancellation, deadline);
 }
 
 void LuaEngine::UnloadScript(const std::string& name) {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::timed_mutex> lock(mutex);
     loadedScripts.erase(name);
 }
 
 bool LuaEngine::IsScriptLoaded(const std::string& name) const {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::timed_mutex> lock(mutex);
     return loadedScripts.find(name) != loadedScripts.end();
 }
 
-bool LuaEngine::RegisterCallback(const std::string& name, const std::string& luaFunctionName) {
-    std::lock_guard<std::mutex> lock(mutex);
-    callbacks[name] = luaFunctionName;
-    return true;
-}
-
-bool LuaEngine::CallCallback(const std::string& name, int nargs, int nresults) {
-    std::lock_guard<std::mutex> lock(mutex);
-    
-    if (!initialized || !L) {
-        lastError = "Lua engine not initialized";
-        return false;
+LuaExecutionResult LuaEngine::InvokeGuiCallback(
+    const std::string& luaFunctionName,
+    int windowId) {
+    std::unique_lock<std::timed_mutex> lock(mutex, std::defer_lock);
+    if (!lock.try_lock()) {
+        return Busy();
+    }
+    if (!initialized || !L || !memService_) {
+        return Failure("Lua engine not initialized");
     }
 
-    auto it = callbacks.find(name);
-    if (it == callbacks.end()) {
-        lastError = "Callback not registered: " + name;
-        return false;
-    }
-
-    // 获取Lua函数
-    lua_getglobal(L, it->second.c_str());
+    LuaStackGuard stackGuard(L);
+    lua_getglobal(L, luaFunctionName.c_str());
     if (!lua_isfunction(L, -1)) {
-        lua_pop(L, 1);
-        lastError = "Lua function not found: " + it->second;
-        return false;
+        return Failure("Lua function not found: " + luaFunctionName);
     }
+    if (!PrepareInterruptibleChunk(L, -1, true)) {
+        return Failure("Failed to make Lua callback interruptible");
+    }
+    lua_pushinteger(L, windowId);
 
-    // 调用函数（参数已经在栈上）
-    LuaOperationBinding operation(L, *memService_);
-    int result = lua_pcall(L, nargs, nresults, 0);
+    const Deadline deadline =
+        Clock::now() + std::chrono::milliseconds(kLuaGuiCallbackTimeoutMs);
+    LuaExecutionControl control{deadline, {}};
+    LuaExecutionModeBinding mode(L, ExecutionMode::GuiFrame);
+    LuaOperationBinding operation(L, *memService_, {}, deadline);
+    LuaHookBinding hook(L, control);
+    const int result = lua_pcall(L, 1, 0, 0);
     if (result != LUA_OK) {
-        lastError = GetLuaError(L);
-        return false;
+        return Failure(ExecutionFailureMessage(control, GetLuaError(L)));
     }
-
-    return true;
+    const std::string interruption =
+        ExecutionInterruptionMessage(control);
+    if (!interruption.empty()) {
+        return Failure(interruption);
+    }
+    return Success();
 }
 
 void LuaEngine::AddScriptPath(const std::string& path) {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::timed_mutex> lock(mutex);
     AddScriptPathLocked(path);
 }
 
 void LuaEngine::AddScriptPathLocked(const std::string& path) {
-    if (!L) return;
+    if (!L) {
+        return;
+    }
 
-    // 获取当前的package.path
+    LuaStackGuard stackGuard(L);
     lua_getglobal(L, "package");
+    if (!lua_istable(L, -1)) {
+        return;
+    }
     lua_getfield(L, -1, "path");
-    
-    std::string currentPath = lua_tostring(L, -1);
-    std::string newPath = currentPath + ";" + path + "/?.lua;" + path + "/?/init.lua";
-    
+    const char* current = lua_tostring(L, -1);
+    std::string newPath = current ? current : "";
+    newPath += ";" + path + "/?.lua;" + path + "/?/init.lua";
     lua_pop(L, 1);
-    lua_pushstring(L, newPath.c_str());
+    lua_pushlstring(L, newPath.data(), newPath.size());
     lua_setfield(L, -2, "path");
-    lua_pop(L, 1);
 }
 
 void LuaEngine::SetScriptBasePath(const std::string& path) {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::timed_mutex> lock(mutex);
     scriptBasePath = path;
     AddScriptPathLocked(path);
 }
 
 std::vector<std::string> LuaEngine::GetLoadedScripts() const {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::timed_mutex> lock(mutex);
     std::vector<std::string> result;
-    for (const auto& pair : loadedScripts) {
-        result.push_back(pair.first);
+    result.reserve(loadedScripts.size());
+    for (const auto& script : loadedScripts) {
+        result.push_back(script.first);
     }
     return result;
 }
 
-bool LuaEngine::CheckLuaError(int result) {
-    if (result != LUA_OK) {
-        lastError = GetLuaError(L);
-        return false;
+LuaEngine::ExecutionMode LuaEngine::CurrentExecutionMode(lua_State* state) {
+    if (!state) {
+        return ExecutionMode::None;
     }
-    return true;
+    lua_pushlightuserdata(state, &g_luaExecutionModeRegistryKey);
+    lua_gettable(state, LUA_REGISTRYINDEX);
+    const lua_Integer raw = lua_isnumber(state, -1)
+        ? lua_tointeger(state, -1)
+        : static_cast<lua_Integer>(ExecutionMode::None);
+    lua_pop(state, 1);
+    if (raw < static_cast<lua_Integer>(ExecutionMode::None) ||
+        raw > static_cast<lua_Integer>(ExecutionMode::Ipc)) {
+        return ExecutionMode::None;
+    }
+    return static_cast<ExecutionMode>(raw);
 }
 
-std::string LuaEngine::GetLuaError(lua_State* L) {
-    const char* error = lua_tostring(L, -1);
+std::string LuaEngine::GetLuaError(lua_State* state) {
+    if (!state || lua_gettop(state) == 0) {
+        return "Unknown Lua error";
+    }
+
+    size_t length = 0;
+    const char* error = lua_tolstring(state, -1, &length);
+    std::string message;
     if (error) {
-        std::string errorStr(error);
-        lua_pop(L, 1);  // 移除错误消息
-        return errorStr;
+        message.assign(error, length);
+    } else {
+        message = "Lua error object of type ";
+        message += lua_typename(state, lua_type(state, -1));
     }
-    return "Unknown Lua error";
+    lua_pop(state, 1);
+    return message;
 }
-

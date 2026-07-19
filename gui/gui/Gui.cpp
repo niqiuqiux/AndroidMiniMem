@@ -5,7 +5,10 @@
 #include "ModulesWindow.h"
 #include "LogWindow.h"
 #include "../imgui/imgui.h"
+#include <exception>
+#include <functional>
 #include <map>
+#include <thread>
 #include <vector>
 
 #ifdef HAVE_LUAJIT
@@ -16,6 +19,48 @@ namespace Gui {
 	std::list<std::unique_ptr<Window>> windows;
 	std::list<std::pair<std::string, int>> logs;
 	std::mutex logsMutex;
+
+	namespace {
+		std::mutex tasksMutex;
+		std::vector<std::function<void()>> pendingTasks;
+		std::thread::id guiThreadId;
+
+		void runPendingTasks()
+		{
+			std::vector<std::function<void()>> tasks;
+			{
+				std::lock_guard<std::mutex> lock(tasksMutex);
+				tasks.swap(pendingTasks);
+			}
+			for (auto& task : tasks) {
+				try {
+					task();
+				} catch (const std::exception& e) {
+					Gui::log("GUI任务执行失败: %s", e.what());
+				} catch (...) {
+					Gui::log("GUI任务执行失败: 未知异常");
+				}
+			}
+		}
+	}
+
+	void postTask(std::function<void()> task)
+	{
+		if (!task)
+			return;
+		bool runImmediately = false;
+		{
+			std::lock_guard<std::mutex> lock(tasksMutex);
+			runImmediately = guiThreadId != std::thread::id{} &&
+				std::this_thread::get_id() == guiThreadId;
+			if (!runImmediately) {
+				pendingTasks.push_back(std::move(task));
+			}
+		}
+		if (runImmediately) {
+			task();
+		}
+	}
 
 	std::vector<std::pair<std::string, int>> getLogsSnapshot()
 	{
@@ -39,6 +84,12 @@ namespace Gui {
 
 	bool mainLoop(Mem::IMemService& service)
 	{
+		{
+			std::lock_guard<std::mutex> lock(tasksMutex);
+			guiThreadId = std::this_thread::get_id();
+		}
+		runPendingTasks();
+
 		static bool bootstrapped = false;
 		if (!bootstrapped) {
 			if (windows.empty()) {
@@ -68,5 +119,20 @@ namespace Gui {
 			}
 		}
 		return hasOpenWindow;
+	}
+
+	void shutdown()
+	{
+		{
+			std::lock_guard<std::mutex> lock(tasksMutex);
+			guiThreadId = std::this_thread::get_id();
+		}
+		runPendingTasks();
+		windows.clear();
+		// LuaScriptWindow 析构会等待后台脚本退出，期间可能产生最后一批任务。
+		runPendingTasks();
+		windows.clear();
+		std::lock_guard<std::mutex> lock(tasksMutex);
+		pendingTasks.clear();
 	}
 }

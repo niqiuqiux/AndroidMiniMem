@@ -23,7 +23,7 @@ constexpr uint32_t kMaxIpcMemoryTransferBytes = 64 * 1024;
 constexpr size_t kMaxIpcBatchReadCount = Mem::kMaxMemoryBatchCount;
 constexpr uint64_t kMaxIpcBatchReadTotalBytes = Mem::kMaxMemoryBatchBytes;
 constexpr int kDefaultIpcLuaTimeoutSeconds = 30;
-constexpr int kMaxIpcLuaTimeoutSeconds = 300;
+constexpr int kMaxIpcLuaTimeoutSeconds = 30;
 constexpr int kDefaultIpcRequestTimeoutSeconds = 30;
 constexpr size_t kMaxIpcStringParamBytes = 4096;
 constexpr size_t kMaxIpcLuaCodeBytes = 256 * 1024;
@@ -950,19 +950,19 @@ void IpcServer::RegisterBuiltinMethods() {
             p, "timeout_seconds", kDefaultIpcLuaTimeoutSeconds,
             1, kMaxIpcLuaTimeoutSeconds);
         auto& engine = LuaEngine::GetInstance();
-        if (!engine.IsInitialized()) {
-            if (!engine.Initialize(*service_))
-                return {{"success", false}, {"error", "Lua 引擎初始化失败: " + engine.GetLastError()}};
-        }
         std::string output;
         SocketIoTimeout::ScopedTimeout luaTimeout(timeoutSeconds);
-        bool ok = engine.ExecuteStringCapture(
-            code,
-            "ipc",
-            output,
-            static_cast<int>(SocketIoTimeout::GetRemainingTimeoutMs()));
-        if (!ok)
-            return {{"success", false}, {"error", engine.GetLastError()}, {"output", output}};
+        const auto deadline = SocketIoTimeout::GetThreadDeadline();
+        const LuaExecutionResult initialization =
+            engine.Initialize(*service_, deadline);
+        if (!initialization.success) {
+            return {{"success", false},
+                    {"error", "Lua 引擎初始化失败: " + initialization.error}};
+        }
+        const LuaExecutionResult execution = engine.ExecuteStringCapture(
+            code, "ipc", output, deadline);
+        if (!execution.success)
+            return {{"success", false}, {"error", execution.error}, {"output", output}};
         return {{"success", true}, {"result", {{"output", output}}}};
     });
 #endif

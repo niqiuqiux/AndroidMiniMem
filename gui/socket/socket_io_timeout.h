@@ -36,6 +36,12 @@ inline DWORD GetThreadTimeoutMs() {
     return g_threadTimeoutMs;
 }
 
+inline std::chrono::steady_clock::time_point GetThreadDeadline() {
+    return HasThreadTimeout()
+        ? g_threadDeadline
+        : (std::chrono::steady_clock::time_point::max)();
+}
+
 inline bool IsThreadTimeoutExpired() {
     return HasThreadTimeout() &&
            std::chrono::steady_clock::now() >= g_threadDeadline;
@@ -67,45 +73,23 @@ public:
         : previous_(g_threadTimeoutMs),
           previousDeadline_(g_threadDeadline) {
         if (seconds <= 0) {
-            g_threadTimeoutMs = 0;
-            g_threadDeadline = {};
+            ApplyDeadline(
+                (std::chrono::steady_clock::time_point::max)());
             return;
         }
 
         const unsigned long long requested =
             static_cast<unsigned long long>(seconds) * 1000ull;
-        g_threadTimeoutMs = ClampTimeoutMs(requested);
-        g_threadDeadline =
+        ApplyDeadline(
             std::chrono::steady_clock::now() +
-            std::chrono::milliseconds(g_threadTimeoutMs);
+            std::chrono::milliseconds(ClampTimeoutMs(requested)));
     }
 
     explicit ScopedTimeout(
         std::chrono::steady_clock::time_point deadline)
         : previous_(g_threadTimeoutMs),
           previousDeadline_(g_threadDeadline) {
-        const auto now = std::chrono::steady_clock::now();
-        if (deadline ==
-            (std::chrono::steady_clock::time_point::max)()) {
-            g_threadTimeoutMs = 0;
-            g_threadDeadline = {};
-            return;
-        }
-        if (deadline <= now) {
-            g_threadTimeoutMs = 1;
-            g_threadDeadline = deadline;
-            return;
-        }
-
-        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-            deadline - now).count();
-        if (remaining <= 0)
-            remaining = 1;
-        g_threadTimeoutMs = ClampTimeoutMs(
-            static_cast<unsigned long long>(remaining));
-        if (g_threadTimeoutMs == 0)
-            g_threadTimeoutMs = 1;
-        g_threadDeadline = deadline;
+        ApplyDeadline(deadline);
     }
 
     ~ScopedTimeout() {
@@ -117,6 +101,51 @@ public:
     ScopedTimeout& operator=(const ScopedTimeout&) = delete;
 
 private:
+    void ApplyDeadline(
+        std::chrono::steady_clock::time_point requestedDeadline) {
+        const auto now = std::chrono::steady_clock::now();
+        auto effectiveDeadline = requestedDeadline;
+
+        if (effectiveDeadline !=
+            (std::chrono::steady_clock::time_point::max)()) {
+            const auto maximumDeadline =
+                now + std::chrono::milliseconds(kMaxTimeoutMs);
+            if (effectiveDeadline > maximumDeadline) {
+                effectiveDeadline = maximumDeadline;
+            }
+        }
+        if (previous_ > 0 &&
+            (effectiveDeadline ==
+                 (std::chrono::steady_clock::time_point::max)() ||
+             previousDeadline_ < effectiveDeadline)) {
+            effectiveDeadline = previousDeadline_;
+        }
+
+        if (effectiveDeadline ==
+            (std::chrono::steady_clock::time_point::max)()) {
+            g_threadTimeoutMs = 0;
+            g_threadDeadline = {};
+            return;
+        }
+
+        g_threadDeadline = effectiveDeadline;
+        if (effectiveDeadline <= now) {
+            g_threadTimeoutMs = 1;
+            return;
+        }
+
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            effectiveDeadline - now).count();
+        if (remaining <= 0) {
+            remaining = 1;
+        }
+        g_threadTimeoutMs = ClampTimeoutMs(
+            static_cast<unsigned long long>(remaining));
+        if (g_threadTimeoutMs == 0) {
+            g_threadTimeoutMs = 1;
+        }
+    }
+
     DWORD previous_ = 0;
     std::chrono::steady_clock::time_point previousDeadline_;
 };

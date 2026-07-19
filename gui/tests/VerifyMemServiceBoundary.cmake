@@ -49,11 +49,42 @@ file(READ "${SOURCE_ROOT}/lua/LuaEngine.cpp" lua_engine_source)
 foreach(required IN ITEMS
         "LuaOperationBinding"
         "LuaAPI::BindOperationContext"
-        "context_.deadline = deadline")
+        "context_.deadline = deadline"
+        "PushIpcEnvironment"
+        "lua_newuserdata"
+        "capture->output = nullptr"
+        "lua_setfenv"
+        "ExecutionMode::Ipc"
+        "PrepareInterruptibleChunk"
+        "LUAJIT_MODE_ALLFUNC")
     string(FIND "${lua_engine_source}" "${required}" position)
     if(position EQUAL -1)
         message(FATAL_ERROR
             "Lua execution context binding is missing: ${required}")
+    endif()
+endforeach()
+
+file(READ "${SOURCE_ROOT}/gui/LuaImGuiWindow.cpp" lua_imgui_window_source)
+foreach(forbidden IN ITEMS "GetState\\(" "lua_pcall\\(")
+    if(lua_imgui_window_source MATCHES "${forbidden}")
+        message(FATAL_ERROR
+            "Lua ImGui window bypasses LuaEngine serialization: ${forbidden}")
+    endif()
+endforeach()
+string(FIND "${lua_imgui_window_source}" "InvokeGuiCallback" position)
+if(position EQUAL -1)
+    message(FATAL_ERROR "Lua ImGui callback is not routed through LuaEngine")
+endif()
+
+file(READ "${SOURCE_ROOT}/lua/LuaAPI_ImGui.cpp" lua_imgui_api_source)
+foreach(required IN ITEMS
+        "GuardedImGuiDispatch"
+        "LuaEngine::CurrentExecutionMode"
+        "Gui::postTask")
+    string(FIND "${lua_imgui_api_source}" "${required}" position)
+    if(position EQUAL -1)
+        message(FATAL_ERROR
+            "guarded Lua ImGui boundary is missing: ${required}")
     endif()
 endforeach()
 foreach(lua_adapter IN ITEMS LuaAPI_Memory.cpp LuaAPI_Assembly.cpp)

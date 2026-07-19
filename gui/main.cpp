@@ -29,6 +29,7 @@ int main(int, char**) {
     });
 
     IpcServer::GetInstance().Stop();
+    Gui::shutdown();
     window.shutdown();
 
     return 0;
