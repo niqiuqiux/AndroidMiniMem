@@ -18,6 +18,10 @@ public:
     // 注册 ImGui API 到 Lua 状态机
     static void Register(lua_State* L);
 
+    // 每次 GUI Lua 回调独立记录其打开的 ImGui 作用域，防止脚本关闭宿主窗口。
+    static void BeginFrameExecution(lua_State* L);
+    static std::string EndFrameExecution(lua_State* L);
+
     // ==================== 窗口管理 ====================
     static int CreateWindow(lua_State* L);
     static int DestroyWindow(lua_State* L);

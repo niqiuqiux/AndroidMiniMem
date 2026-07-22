@@ -91,16 +91,16 @@ static DisassemblyHelper& GetLuaDisassemblyHelper() {
 void LuaAPI_Assembly::Register(lua_State* L) {
     lua_newtable(L);
 
-    lua_pushcfunction(L, Assemble);
+    LuaAPI::PushProtectedFunction(L, Assemble, "asm.assemble");
     lua_setfield(L, -2, "assemble");
 
-    lua_pushcfunction(L, Disassemble);
+    LuaAPI::PushProtectedFunction(L, Disassemble, "asm.disassemble");
     lua_setfield(L, -2, "disassemble");
 
-    lua_pushcfunction(L, Patch);
+    LuaAPI::PushProtectedFunction(L, Patch, "asm.patch");
     lua_setfield(L, -2, "patch");
 
-    lua_pushcfunction(L, IsAvailable);
+    LuaAPI::PushProtectedFunction(L, IsAvailable, "asm.isAvailable");
     lua_setfield(L, -2, "isAvailable");
 
     lua_setglobal(L, "asm");

@@ -12,6 +12,7 @@
 #include <cmath>
 #include <limits>
 #include <new>
+#include <cstdio>
 #include <utility>
 
 // 全局窗口管理器：窗口ID -> 窗口指针
@@ -24,7 +25,6 @@ struct LuaInputTextState {
 };
 
 static std::map<std::pair<lua_State*, ImGuiID>, LuaInputTextState> luaInputTextStates;
-static std::map<lua_State*, std::vector<int>> luaTableStack;
 
 namespace {
 constexpr int kMaxLuaTableColumns = 511;
@@ -46,6 +46,60 @@ struct GuardedImGuiFunction {
     const char* name = nullptr;
 };
 
+enum class ImGuiScopeKind {
+    Window,
+    Child,
+    Tree,
+    Table,
+};
+
+struct ImGuiScope {
+    ImGuiScopeKind kind = ImGuiScopeKind::Window;
+    int tableColumns = 0;
+};
+
+std::map<lua_State*, std::vector<ImGuiScope>> luaImGuiScopes;
+
+const char* ScopeName(ImGuiScopeKind kind) {
+    switch (kind) {
+    case ImGuiScopeKind::Window: return "begin/end";
+    case ImGuiScopeKind::Child: return "beginChild/endChild";
+    case ImGuiScopeKind::Tree: return "treeNode/treePop";
+    case ImGuiScopeKind::Table: return "beginTable/endTable";
+    }
+    return "unknown";
+}
+
+bool HasTopScope(lua_State* L, ImGuiScopeKind kind) {
+    const auto found = luaImGuiScopes.find(L);
+    return found != luaImGuiScopes.end() && !found->second.empty() &&
+           found->second.back().kind == kind;
+}
+
+void PushScope(lua_State* L, ImGuiScopeKind kind, int tableColumns = 0) {
+    luaImGuiScopes[L].push_back({kind, tableColumns});
+}
+
+void PopScope(lua_State* L) {
+    auto found = luaImGuiScopes.find(L);
+    if (found == luaImGuiScopes.end() || found->second.empty()) {
+        return;
+    }
+    found->second.pop_back();
+    if (found->second.empty()) {
+        luaImGuiScopes.erase(found);
+    }
+}
+
+int CurrentTableColumns(lua_State* L) {
+    const auto found = luaImGuiScopes.find(L);
+    if (found == luaImGuiScopes.end() || found->second.empty() ||
+        found->second.back().kind != ImGuiScopeKind::Table) {
+        return 0;
+    }
+    return found->second.back().tableColumns;
+}
+
 int GuardedImGuiDispatch(lua_State* L) {
     auto* guarded = static_cast<GuardedImGuiFunction*>(
         lua_touserdata(L, lua_upvalueindex(1)));
@@ -60,7 +114,10 @@ int GuardedImGuiDispatch(lua_State* L) {
             L, "imgui.%s is not available in this Lua execution context",
             guarded->name ? guarded->name : "<unknown>");
     }
-    return guarded->function(L);
+    char apiName[128]{};
+    std::snprintf(apiName, sizeof(apiName), "imgui.%s",
+                  guarded->name ? guarded->name : "<unknown>");
+    return LuaAPI::InvokeProtected(L, guarded->function, apiName);
 }
 
 void RegisterGuardedImGuiFunction(lua_State* L,
@@ -249,6 +306,28 @@ void LuaAPI_ImGui::Register(lua_State* L) {
     lua_setglobal(L, "imgui");
 }
 
+void LuaAPI_ImGui::BeginFrameExecution(lua_State* L) {
+    luaImGuiScopes.erase(L);
+}
+
+std::string LuaAPI_ImGui::EndFrameExecution(lua_State* L) {
+    const auto found = luaImGuiScopes.find(L);
+    if (found == luaImGuiScopes.end()) {
+        return {};
+    }
+
+    std::string scopes;
+    for (auto scope = found->second.rbegin();
+         scope != found->second.rend(); ++scope) {
+        if (!scopes.empty()) {
+            scopes += ", ";
+        }
+        scopes += ScopeName(scope->kind);
+    }
+    luaImGuiScopes.erase(found);
+    return scopes;
+}
+
 // ==================== 窗口管理API ====================
 int LuaAPI_ImGui::CreateWindow(lua_State* L) {
     const char* windowName = luaL_checkstring(L, 1);
@@ -308,20 +387,27 @@ int LuaAPI_ImGui::SetWindowOpen(lua_State* L) {
 // ==================== 窗口控制API ====================
 int LuaAPI_ImGui::Begin(lua_State* L) {
     const char* name = luaL_checkstring(L, 1);
+    bool open = true;
     bool* pOpen = nullptr;
     if (lua_isboolean(L, 2)) {
-        bool open = lua_toboolean(L, 2) != 0;
+        open = lua_toboolean(L, 2) != 0;
         pOpen = &open;
     }
     
     int flags = checkOptionalInt(L, 3, 0, "window flags");
     bool result = ImGui::Begin(name, pOpen, flags);
+    PushScope(L, ImGuiScopeKind::Window);
     lua_pushboolean(L, result ? 1 : 0);
     return 1;
 }
 
 int LuaAPI_ImGui::End(lua_State* L) {
+    if (!HasTopScope(L, ImGuiScopeKind::Window)) {
+        return luaL_error(L,
+            "imgui.end called without a matching imgui.begin");
+    }
     ImGui::End();
+    PopScope(L);
     return 0;
 }
 
@@ -332,12 +418,18 @@ int LuaAPI_ImGui::BeginChild(lua_State* L) {
     int flags = checkOptionalInt(L, 4, 0, "child flags");
     
     bool result = ImGui::BeginChild(strId, size, border, flags);
+    PushScope(L, ImGuiScopeKind::Child);
     lua_pushboolean(L, result ? 1 : 0);
     return 1;
 }
 
 int LuaAPI_ImGui::EndChild(lua_State* L) {
+    if (!HasTopScope(L, ImGuiScopeKind::Child)) {
+        return luaL_error(L,
+            "imgui.endChild called without a matching imgui.beginChild");
+    }
     ImGui::EndChild();
+    PopScope(L);
     return 0;
 }
 
@@ -536,12 +628,20 @@ int LuaAPI_ImGui::SetColumnWidth(lua_State* L) {
 int LuaAPI_ImGui::TreeNode(lua_State* L) {
     const char* label = luaL_checkstring(L, 1);
     bool result = ImGui::TreeNode(label);
+    if (result) {
+        PushScope(L, ImGuiScopeKind::Tree);
+    }
     lua_pushboolean(L, result ? 1 : 0);
     return 1;
 }
 
 int LuaAPI_ImGui::TreePop(lua_State* L) {
+    if (!HasTopScope(L, ImGuiScopeKind::Tree)) {
+        return luaL_error(L,
+            "imgui.treePop called without an open imgui.treeNode");
+    }
     ImGui::TreePop();
+    PopScope(L);
     return 0;
 }
 
@@ -632,31 +732,26 @@ int LuaAPI_ImGui::BeginTable(lua_State* L) {
     
     bool result = ImGui::BeginTable(strId, column, flags, outerSize, innerWidth);
     if (result) {
-        luaTableStack[L].push_back(column);
+        PushScope(L, ImGuiScopeKind::Table, column);
     }
     lua_pushboolean(L, result ? 1 : 0);
     return 1;
 }
 
 int LuaAPI_ImGui::EndTable(lua_State* L) {
-    auto it = luaTableStack.find(L);
-    if (it == luaTableStack.end() || it->second.empty()) {
-        luaL_error(L, "EndTable called without active table");
-        return 0;
-    }
-    it->second.pop_back();
-    if (it->second.empty()) {
-        luaTableStack.erase(it);
+    if (!HasTopScope(L, ImGuiScopeKind::Table)) {
+        return luaL_error(L,
+            "imgui.endTable called without a matching imgui.beginTable");
     }
     ImGui::EndTable();
+    PopScope(L);
     return 0;
 }
 
 int LuaAPI_ImGui::TableNextRow(lua_State* L) {
-    auto it = luaTableStack.find(L);
-    if (it == luaTableStack.end() || it->second.empty()) {
-        luaL_error(L, "TableNextRow called without active table");
-        return 0;
+    if (!HasTopScope(L, ImGuiScopeKind::Table)) {
+        return luaL_error(L,
+            "imgui.tableNextRow called without an active table");
     }
     int rowFlags = checkOptionalInt(L, 1, 0, "row flags");
     float minRowHeight = checkOptionalFloat(L, 2, 0.0f, "minimum row height");
@@ -665,8 +760,7 @@ int LuaAPI_ImGui::TableNextRow(lua_State* L) {
 }
 
 int LuaAPI_ImGui::TableNextColumn(lua_State* L) {
-    auto it = luaTableStack.find(L);
-    if (it == luaTableStack.end() || it->second.empty()) {
+    if (!HasTopScope(L, ImGuiScopeKind::Table)) {
         lua_pushboolean(L, 0);
         return 1;
     }
@@ -677,8 +771,8 @@ int LuaAPI_ImGui::TableNextColumn(lua_State* L) {
 
 int LuaAPI_ImGui::TableSetColumnIndex(lua_State* L) {
     int columnN = checkIntRange(L, 1, 0, kMaxLuaTableColumns - 1, "table column index");
-    auto it = luaTableStack.find(L);
-    if (it == luaTableStack.end() || it->second.empty() || columnN >= it->second.back()) {
+    const int tableColumns = CurrentTableColumns(L);
+    if (tableColumns == 0 || columnN >= tableColumns) {
         lua_pushboolean(L, 0);
         return 1;
     }

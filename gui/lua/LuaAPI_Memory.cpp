@@ -92,40 +92,29 @@ int serviceWriteMemory(lua_State* L,
 void LuaAPI_Memory::Register(lua_State* L) {
     // 创建mem表
     lua_newtable(L);
-    lua_pushcfunction(L, ReadMemory);
-    lua_setfield(L, -2, "read");
-    lua_pushcfunction(L, WriteMemory);
-    lua_setfield(L, -2, "write");
-    lua_pushcfunction(L, ReadMemoryBatch);
-    lua_setfield(L, -2, "readBatch");
-    lua_pushcfunction(L, ReadInt);
-    lua_setfield(L, -2, "readInt");
-    lua_pushcfunction(L, ReadLong);
-    lua_setfield(L, -2, "readLong");
-    lua_pushcfunction(L, ReadShort);
-    lua_setfield(L, -2, "readShort");
-    lua_pushcfunction(L, ReadByte);
-    lua_setfield(L, -2, "readByte");
-    lua_pushcfunction(L, WriteInt);
-    lua_setfield(L, -2, "writeInt");
-    lua_pushcfunction(L, WriteLong);
-    lua_setfield(L, -2, "writeLong");
-    lua_pushcfunction(L, WriteShort);
-    lua_setfield(L, -2, "writeShort");
-    lua_pushcfunction(L, WriteByte);
-    lua_setfield(L, -2, "writeByte");
-    lua_pushcfunction(L, ReadFloat);
-    lua_setfield(L, -2, "readFloat");
-    lua_pushcfunction(L, ReadDouble);
-    lua_setfield(L, -2, "readDouble");
-    lua_pushcfunction(L, WriteFloat);
-    lua_setfield(L, -2, "writeFloat");
-    lua_pushcfunction(L, WriteDouble);
-    lua_setfield(L, -2, "writeDouble");
-    lua_pushcfunction(L, ReadString);
-    lua_setfield(L, -2, "readString");
-    lua_pushcfunction(L, WriteString);
-    lua_setfield(L, -2, "writeString");
+    const auto registerFunction = [L](const char* field,
+                                      lua_CFunction function,
+                                      const char* apiName) {
+        LuaAPI::PushProtectedFunction(L, function, apiName);
+        lua_setfield(L, -2, field);
+    };
+    registerFunction("read", ReadMemory, "mem.read");
+    registerFunction("write", WriteMemory, "mem.write");
+    registerFunction("readBatch", ReadMemoryBatch, "mem.readBatch");
+    registerFunction("readInt", ReadInt, "mem.readInt");
+    registerFunction("readLong", ReadLong, "mem.readLong");
+    registerFunction("readShort", ReadShort, "mem.readShort");
+    registerFunction("readByte", ReadByte, "mem.readByte");
+    registerFunction("writeInt", WriteInt, "mem.writeInt");
+    registerFunction("writeLong", WriteLong, "mem.writeLong");
+    registerFunction("writeShort", WriteShort, "mem.writeShort");
+    registerFunction("writeByte", WriteByte, "mem.writeByte");
+    registerFunction("readFloat", ReadFloat, "mem.readFloat");
+    registerFunction("readDouble", ReadDouble, "mem.readDouble");
+    registerFunction("writeFloat", WriteFloat, "mem.writeFloat");
+    registerFunction("writeDouble", WriteDouble, "mem.writeDouble");
+    registerFunction("readString", ReadString, "mem.readString");
+    registerFunction("writeString", WriteString, "mem.writeString");
     lua_setglobal(L, "mem");
 }
 

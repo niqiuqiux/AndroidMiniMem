@@ -174,6 +174,7 @@ endif()
 if(HAVE_LUAJIT)
     list(APPEND GUI_SOURCES gui/LuaScriptWindow.cpp gui/LuaImGuiWindow.cpp)
     list(APPEND LUA_SOURCES
+        lua/LuaDiagnostics.cpp
         lua/LuaEngine.cpp
         lua/LuaAPI.cpp
         lua/LuaAPI_Memory.cpp

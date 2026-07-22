@@ -1,5 +1,6 @@
 #include "../gui/Gui.h"
 #include "../gui/Window.h"
+#include "../imgui/imgui.h"
 #include "../lua/LuaEngine.h"
 #include "../mem/IMemService.h"
 
@@ -8,6 +9,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <stdexcept>
 #include <thread>
 
 void Window::draw() {}
@@ -113,7 +115,10 @@ public:
     }
     Mem::Result<Mem::MemoryBlock> readMemory(
         const Mem::OperationContext&,
-        const Mem::MemoryReadRequest&) override {
+        const Mem::MemoryReadRequest& request) override {
+        if (request.address == 0xC0FFEE) {
+            throw std::runtime_error("synthetic host API failure");
+        }
         return unavailable<Mem::MemoryBlock>();
     }
     Mem::Result<Mem::MemoryBatch> readMemoryBatch(
@@ -228,12 +233,45 @@ void testErrorStackCleanup() {
     std::string output;
     LuaExecutionResult result = executeIpc("error({ reason = 'test' })", output);
     check(!result.success &&
-              result.error == "Lua error object of type table",
-          "non-string Lua errors should be reported and popped");
+              result.error.find("Lua error object of type table") !=
+                  std::string::npos &&
+              result.error.find("stack traceback:") != std::string::npos,
+          "non-string Lua errors should include a traceback and be popped");
 
     result = executeIpc("print('after_error')", output);
     check(result.success && output == "after_error\n",
           "a Lua error must not contaminate the next execution stack");
+}
+
+void testLuaTracebackAndHostExceptionBoundary() {
+    std::string output;
+    LuaExecutionResult result = executeIpc(R"lua(
+        local function inner()
+            error("nested Lua failure")
+        end
+        local function outer()
+            inner()
+        end
+        outer()
+    )lua", output);
+    check(!result.success &&
+              result.error.find("nested Lua failure") != std::string::npos &&
+              result.error.find("stack traceback:") != std::string::npos &&
+              result.error.find("sandbox_test") != std::string::npos,
+          "nested Lua errors should report the chunk and Lua call stack");
+
+    const std::string diagnostic = LuaEngine::GetCrashDiagnostic();
+    check(diagnostic.find("sandbox_test") != std::string::npos &&
+              diagnostic.find("nested Lua failure") != std::string::npos,
+          "the crash snapshot should retain the latest Lua failure");
+
+    result = executeIpc("mem.read(0xC0FFEE, 4)", output);
+    check(!result.success &&
+              result.error.find("mem.read") != std::string::npos &&
+              result.error.find("synthetic host API failure") !=
+                  std::string::npos &&
+              result.error.find("stack traceback:") != std::string::npos,
+          "C++ exceptions from host APIs should become Lua errors");
 }
 
 void testImGuiExecutionGuard() {
@@ -265,6 +303,59 @@ void testGuiCallbackTimeout() {
           "a hanging GUI callback should be interrupted");
     check(elapsed < std::chrono::seconds(2),
           "GUI callback timeout should keep the client responsive");
+}
+
+void testGuiCallbackScopeRecovery() {
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(800.0f, 600.0f);
+    io.DeltaTime = 1.0f / 60.0f;
+    unsigned char* fontPixels = nullptr;
+    int fontWidth = 0;
+    int fontHeight = 0;
+    io.Fonts->GetTexDataAsRGBA32(
+        &fontPixels, &fontWidth, &fontHeight);
+    ImGui::NewFrame();
+    ImGui::Begin("Lua scope recovery host");
+
+    LuaExecutionResult result = LuaEngine::GetInstance().ExecuteString(R"lua(
+        function sandbox_extra_end_callback()
+            imgui["end"]()
+        end
+        function sandbox_unclosed_window_callback()
+            imgui.begin("Unclosed Lua window", true)
+            error("failure after imgui.begin")
+        end
+    )lua", "=imgui_scope_test");
+    if (!result.success) {
+        std::cerr << "ImGui callback registration error: "
+                  << result.error << '\n';
+    }
+    check(result.success, "test ImGui callbacks should be registered");
+
+    if (result.success) {
+        result = LuaEngine::GetInstance().InvokeGuiCallback(
+            "sandbox_extra_end_callback", 1);
+        check(!result.success &&
+                  result.error.find("without a matching imgui.begin") !=
+                      std::string::npos &&
+                  result.error.find("stack traceback:") != std::string::npos,
+              "Lua must not be able to close the host ImGui window");
+
+        result = LuaEngine::GetInstance().InvokeGuiCallback(
+            "sandbox_unclosed_window_callback", 1);
+        check(!result.success &&
+                  result.error.find("failure after imgui.begin") !=
+                      std::string::npos &&
+                  result.error.find("Unclosed Lua ImGui scopes") !=
+                      std::string::npos &&
+                  result.error.find("Missing End()") != std::string::npos,
+              "Lua callback errors should recover unclosed ImGui scopes");
+    }
+
+    ImGui::End();
+    ImGui::EndFrame();
+    ImGui::DestroyContext();
 }
 
 void testDeadlineIncludesEngineLockWait() {
@@ -358,8 +449,10 @@ int main() {
         testSandboxAndCapture();
         testEnvironmentIsolationAndCaptureLifetime();
         testErrorStackCleanup();
+        testLuaTracebackAndHostExceptionBoundary();
         testImGuiExecutionGuard();
         testGuiCallbackTimeout();
+        testGuiCallbackScopeRecovery();
         testDeadlineIncludesEngineLockWait();
         testCancellationInterruptsSleep();
         testPureLuaTimeout();

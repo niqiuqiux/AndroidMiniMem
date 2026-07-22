@@ -50,9 +50,11 @@ namespace ExceptionHandler
 
     // 异常回调函数类型
     typedef void (*ExceptionCallback)(const ExceptionInfo& info);
+    typedef std::string (*DiagnosticProvider)();
 
     // 内部变量
     static ExceptionCallback g_exceptionCallback = nullptr;
+    static DiagnosticProvider g_diagnosticProvider = nullptr;
     static std::string g_dumpDirectory = ".\\";
     static std::string g_applicationName = "Application";
 
@@ -341,6 +343,27 @@ namespace ExceptionHandler
                        << pRecord->ExceptionInformation[1] << "\n";
             }
         }
+
+        // Lua 等运行时只能提供预先保存的快照，异常现场不再访问其内部状态机。
+        if (g_diagnosticProvider)
+        {
+            try
+            {
+                const std::string diagnostic = g_diagnosticProvider();
+                if (!diagnostic.empty())
+                {
+                    report << "\nLua 执行诊断 (Lua Execution Diagnostic):\n";
+                    report << "----------------------------------------\n";
+                    report << diagnostic;
+                    if (diagnostic.back() != '\n')
+                        report << "\n";
+                }
+            }
+            catch (...)
+            {
+                report << "\nLua 执行诊断: 获取快照失败\n";
+            }
+        }
         
         // 寄存器信息
         if (pExceptionPointers && pExceptionPointers->ContextRecord)
@@ -519,10 +542,25 @@ namespace ExceptionHandler
     // 信号处理器
     inline void SignalHandler(int signal)
     {
+        CONTEXT context = {};
+        RtlCaptureContext(&context);
+        EXCEPTION_RECORD exceptionRecord = {};
+        exceptionRecord.ExceptionCode = static_cast<DWORD>(signal);
+#ifdef _M_X64
+        exceptionRecord.ExceptionAddress = reinterpret_cast<PVOID>(context.Rip);
+#elif _M_IX86
+        exceptionRecord.ExceptionAddress = reinterpret_cast<PVOID>(context.Eip);
+#else
+        exceptionRecord.ExceptionAddress = nullptr;
+#endif
+        EXCEPTION_POINTERS exceptionPointers = {
+            &exceptionRecord, &context
+        };
+
         ExceptionInfo info = {};
         info.exceptionCode = signal;
-        info.exceptionAddress = nullptr;
-        info.pExceptionPointers = nullptr;
+        info.exceptionAddress = exceptionRecord.ExceptionAddress;
+        info.pExceptionPointers = &exceptionPointers;
 
         switch (signal)
         {
@@ -558,7 +596,7 @@ namespace ExceptionHandler
 
         std::string reportFileName = g_applicationName + "_signal_" + GetTimestamp() + ".txt";
         info.dumpFilePath = g_dumpDirectory + reportFileName;
-        CreateExceptionReport(nullptr, info.dumpFilePath, info);
+        CreateExceptionReport(&exceptionPointers, info.dumpFilePath, info);
 
         if (g_exceptionCallback)
         {
@@ -566,6 +604,11 @@ namespace ExceptionHandler
         }
 
         ExitProcess(1);
+    }
+
+    inline void SetDiagnosticProvider(DiagnosticProvider provider)
+    {
+        g_diagnosticProvider = provider;
     }
 
     // 初始化异常处理器
@@ -665,8 +708,10 @@ namespace ExceptionHandler
     };
 
     typedef void (*ExceptionCallback)(const ExceptionInfo& info);
+    typedef std::string (*DiagnosticProvider)();
 
     static ExceptionCallback g_exceptionCallback = nullptr;
+    static DiagnosticProvider g_diagnosticProvider = nullptr;
     static std::string g_dumpDirectory = "./";
     static std::string g_applicationName = "Application";
 
@@ -713,6 +758,11 @@ namespace ExceptionHandler
         {
             g_exceptionCallback(info);
         }
+    }
+
+    inline void SetDiagnosticProvider(DiagnosticProvider provider)
+    {
+        g_diagnosticProvider = provider;
     }
 
     inline void TerminateHandler()

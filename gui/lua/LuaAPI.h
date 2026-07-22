@@ -33,6 +33,12 @@ public:
     static Mem::OperationContext* BindOperationContext(
         lua_State* L, Mem::OperationContext* context);
 
+    // 所有宿主 C++ 回调统一经过此边界，禁止异常穿过 Lua C 调用栈。
+    static void PushProtectedFunction(
+        lua_State* L, lua_CFunction function, const char* apiName);
+    static int InvokeProtected(
+        lua_State* L, lua_CFunction function, const char* apiName);
+
     // ==================== 内存操作API ====================
     // 已移至 LuaAPI_Memory.h
 

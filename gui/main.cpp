@@ -4,6 +4,10 @@
 #include "mem/SystemMemService.h"
 #include "renderer/AppWindow.h"
 
+#ifdef HAVE_LUAJIT
+#include "lua/LuaEngine.h"
+#endif
+
 #include <cstdio>
 
 int main(int, char**) {
@@ -13,6 +17,10 @@ int main(int, char**) {
                         info.description.c_str(),
                         info.dumpFilePath.c_str());
         });
+#ifdef HAVE_LUAJIT
+    ExceptionHandler::SetDiagnosticProvider(
+        &LuaEngine::GetCrashDiagnostic);
+#endif
 
     AppWindow window;
     if (!window.init("MiniMem - Android Memory Debugger", 1280, 800)) {

@@ -92,6 +92,9 @@ public:
     // 仅供受守卫的 Lua C API 判断当前调用边界，不暴露 lua_State 所有权。
     static ExecutionMode CurrentExecutionMode(lua_State* state);
 
+    // 崩溃处理器只读取预先保存的线程本地快照，不在异常现场遍历 lua_State。
+    static std::string GetCrashDiagnostic();
+
 private:
     LuaEngine() = default;
     ~LuaEngine();

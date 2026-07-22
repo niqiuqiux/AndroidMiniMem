@@ -1,12 +1,16 @@
 #include "LuaEngine.h"
 #include "LuaAPI.h"
+#include "LuaAPI_ImGui.h"
+#include "LuaDiagnostics.h"
 #include "../mem/IMemService.h"
+#include "../imgui/imgui_internal.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <new>
+#include <sstream>
 #include <utility>
 
 #ifdef HAVE_LUAJIT
@@ -27,9 +31,38 @@ namespace {
 constexpr size_t kMaxCapturedOutputBytes = 1024 * 1024;
 constexpr int kLuaHookInstructionInterval = 10000;
 constexpr int kLuaGuiCallbackTimeoutMs = 250;
+constexpr const char* kGuiScriptModeName = "GUI 脚本";
+constexpr const char* kGuiFrameModeName = "GUI 帧回调";
+constexpr const char* kIpcModeName = "IPC";
 
 char g_luaExecutionControlRegistryKey;
 char g_luaExecutionModeRegistryKey;
+
+int LuaPanic(lua_State* state) {
+    LuaDiagnostics::RecordPanic(state);
+    return 0;
+}
+
+int LuaTraceback(lua_State* state) {
+    const char* message = lua_tostring(state, 1);
+    if (!message) {
+        lua_pushfstring(state, "Lua error object of type %s",
+                        luaL_typename(state, 1));
+        message = lua_tostring(state, -1);
+    }
+    luaL_traceback(state, state, message, 1);
+    return 1;
+}
+
+int ProtectedLuaCall(lua_State* state, int argumentCount, int resultCount) {
+    const int functionIndex = lua_gettop(state) - argumentCount;
+    lua_pushcfunction(state, LuaTraceback);
+    lua_insert(state, functionIndex);
+    const int status = lua_pcall(
+        state, argumentCount, resultCount, functionIndex);
+    lua_remove(state, functionIndex);
+    return status;
+}
 
 struct LuaExecutionControl {
     LuaEngine::Deadline deadline = (LuaEngine::Deadline::max)();
@@ -41,6 +74,152 @@ struct LuaExecutionControl {
 struct LuaCaptureContext {
     std::string* output = nullptr;
     bool truncated = false;
+};
+
+class LuaDiagnosticBinding {
+public:
+    LuaDiagnosticBinding(const char* chunkName, const char* mode) {
+        LuaDiagnostics::BeginExecution(chunkName, mode);
+    }
+
+    ~LuaDiagnosticBinding() {
+        if (!completed_) {
+            try {
+                LuaDiagnostics::EndExecutionFailure(
+                    "Lua execution aborted by an uncaught host exception");
+            } catch (...) {
+            }
+        }
+    }
+
+    void Success() {
+        if (!completed_) {
+            LuaDiagnostics::EndExecutionSuccess();
+            completed_ = true;
+        }
+    }
+
+    void Failure(const std::string& error) {
+        if (!completed_) {
+            LuaDiagnostics::EndExecutionFailure(error);
+            completed_ = true;
+        }
+    }
+
+private:
+    bool completed_ = false;
+};
+
+struct ImGuiErrorCapture {
+    std::string messages;
+    ImGuiErrorCallback previousCallback = nullptr;
+    void* previousUserData = nullptr;
+};
+
+void CaptureImGuiError(ImGuiContext* context,
+                       void* userData,
+                       const char* message) {
+    auto* capture = static_cast<ImGuiErrorCapture*>(userData);
+    if (!capture) {
+        return;
+    }
+    try {
+        if (!capture->messages.empty()) {
+            capture->messages += "; ";
+        }
+        capture->messages += message ? message : "unknown ImGui error";
+    } catch (...) {
+    }
+    if (capture->previousCallback) {
+        try {
+            capture->previousCallback(
+                context, capture->previousUserData, message);
+        } catch (...) {
+        }
+    }
+}
+
+class LuaImGuiErrorBoundary {
+public:
+    LuaImGuiErrorBoundary() {
+        context_ = ImGui::GetCurrentContext();
+        if (!context_ || !context_->CurrentWindow) {
+            context_ = nullptr;
+            return;
+        }
+
+        ImGui::ErrorRecoveryStoreState(&initialState_);
+        previousAssertEnabled_ = context_->IO.ConfigErrorRecoveryEnableAssert;
+        capture_.previousCallback = context_->ErrorCallback;
+        capture_.previousUserData = context_->ErrorCallbackUserData;
+        context_->IO.ConfigErrorRecoveryEnableAssert = false;
+        context_->ErrorCallback = CaptureImGuiError;
+        context_->ErrorCallbackUserData = &capture_;
+    }
+
+    ~LuaImGuiErrorBoundary() {
+        if (!finished_) {
+            try {
+                Finish();
+            } catch (...) {
+                Restore();
+            }
+        }
+    }
+
+    const std::string& Finish() {
+        if (!context_ || finished_) {
+            return capture_.messages;
+        }
+        ImGui::ErrorRecoveryTryToRecoverState(&initialState_);
+        Restore();
+        finished_ = true;
+        return capture_.messages;
+    }
+
+private:
+    void Restore() {
+        if (!context_) {
+            return;
+        }
+        context_->ErrorCallback = capture_.previousCallback;
+        context_->ErrorCallbackUserData = capture_.previousUserData;
+        context_->IO.ConfigErrorRecoveryEnableAssert = previousAssertEnabled_;
+    }
+
+    ImGuiContext* context_ = nullptr;
+    ImGuiErrorRecoveryState initialState_;
+    ImGuiErrorCapture capture_;
+    bool previousAssertEnabled_ = true;
+    bool finished_ = false;
+};
+
+class LuaImGuiScopeBinding {
+public:
+    explicit LuaImGuiScopeBinding(lua_State* state) : state_(state) {
+        LuaAPI_ImGui::BeginFrameExecution(state_);
+    }
+
+    ~LuaImGuiScopeBinding() {
+        if (!finished_) {
+            try {
+                LuaAPI_ImGui::EndFrameExecution(state_);
+            } catch (...) {
+            }
+        }
+    }
+
+    std::string Finish() {
+        if (finished_) {
+            return {};
+        }
+        finished_ = true;
+        return LuaAPI_ImGui::EndFrameExecution(state_);
+    }
+
+private:
+    lua_State* state_ = nullptr;
+    bool finished_ = false;
 };
 
 LuaExecutionResult Success() {
@@ -157,6 +336,7 @@ private:
 };
 
 void LuaExecutionHook(lua_State* state, lua_Debug*) {
+    LuaDiagnostics::UpdateLuaLocation(state);
     lua_pushlightuserdata(state, &g_luaExecutionControlRegistryKey);
     lua_gettable(state, LUA_REGISTRYINDEX);
     auto* control = static_cast<LuaExecutionControl*>(
@@ -271,7 +451,7 @@ void AppendCapturedOutput(LuaCaptureContext* context, const char* text) {
     AppendCapturedOutput(context, text, std::strlen(text));
 }
 
-int CapturePrint(lua_State* state) {
+int CapturePrintImpl(lua_State* state) {
     auto* capture = static_cast<LuaCaptureContext*>(
         lua_touserdata(state, lua_upvalueindex(1)));
     const int count = lua_gettop(state);
@@ -296,6 +476,10 @@ int CapturePrint(lua_State* state) {
     }
     AppendCapturedOutput(capture, "\n");
     return 0;
+}
+
+int CapturePrint(lua_State* state) {
+    return LuaAPI::InvokeProtected(state, CapturePrintImpl, "print");
 }
 
 int AbsoluteIndex(lua_State* state, int index) {
@@ -397,6 +581,26 @@ std::string ExecutionFailureMessage(const LuaExecutionControl& control,
     return luaError;
 }
 
+std::string AppendImGuiDiagnostics(std::string error,
+                                   const std::string& openScopes,
+                                   const std::string& imguiErrors) {
+    if (openScopes.empty() && imguiErrors.empty()) {
+        return error;
+    }
+    if (error.empty()) {
+        error = "Lua ImGui callback left ImGui in an invalid state";
+    }
+    if (!openScopes.empty()) {
+        error += "\nUnclosed Lua ImGui scopes: ";
+        error += openScopes;
+    }
+    if (!imguiErrors.empty()) {
+        error += "\nImGui recovery: ";
+        error += imguiErrors;
+    }
+    return error;
+}
+
 } // namespace
 
 LuaEngine& LuaEngine::GetInstance() {
@@ -425,6 +629,7 @@ LuaExecutionResult LuaEngine::Initialize(Mem::IMemService& service,
     if (!L) {
         return Failure("Failed to create Lua state");
     }
+    lua_atpanic(L, LuaPanic);
 
     RegisterStandardLibs();
     memService_ = &service;
@@ -497,40 +702,54 @@ LuaExecutionResult LuaEngine::ExecuteFileLocked(
     }
 
     LuaStackGuard stackGuard(L);
+    LuaDiagnosticBinding diagnostics(filepath.c_str(), kGuiScriptModeName);
     int result = luaL_loadfile(L, filepath.c_str());
     if (result != LUA_OK) {
-        return Failure(GetLuaError(L));
+        const std::string error = GetLuaError(L);
+        diagnostics.Failure(error);
+        return Failure(error);
     }
     if (!PrepareInterruptibleChunk(
             L, -1,
             cancellation || deadline != (Deadline::max)())) {
-        return Failure("Failed to make Lua chunk interruptible");
+        const std::string error = "Failed to make Lua chunk interruptible";
+        diagnostics.Failure(error);
+        return Failure(error);
     }
     if (cancellation &&
         cancellation->load(std::memory_order_acquire)) {
-        return Failure("Lua execution cancelled");
+        const std::string error = "Lua execution cancelled";
+        diagnostics.Failure(error);
+        return Failure(error);
     }
     if (DeadlineExpired(deadline)) {
-        return Failure("Lua execution timed out");
+        const std::string error = "Lua execution timed out";
+        diagnostics.Failure(error);
+        return Failure(error);
     }
 
     LuaExecutionControl control{deadline, cancellation};
     LuaExecutionModeBinding mode(L, ExecutionMode::GuiScript);
     LuaOperationBinding operation(L, *memService_, cancellation, deadline);
     LuaHookBinding hook(L, control);
-    result = lua_pcall(L, 0, 0, 0);
+    result = ProtectedLuaCall(L, 0, 0);
     if (result != LUA_OK) {
-        return Failure(ExecutionFailureMessage(control, GetLuaError(L)));
+        const std::string error =
+            ExecutionFailureMessage(control, GetLuaError(L));
+        diagnostics.Failure(error);
+        return Failure(error);
     }
     const std::string interruption =
         ExecutionInterruptionMessage(control);
     if (!interruption.empty()) {
+        diagnostics.Failure(interruption);
         return Failure(interruption);
     }
 
     const std::string filename =
         std::filesystem::path(filepath).filename().string();
     loadedScripts[filename] = filepath;
+    diagnostics.Success();
     return Success();
 }
 
@@ -563,37 +782,51 @@ LuaExecutionResult LuaEngine::ExecuteStringLocked(
     }
 
     LuaStackGuard stackGuard(L);
+    LuaDiagnosticBinding diagnostics(chunkName.c_str(), kGuiScriptModeName);
     int result = luaL_loadbuffer(
         L, code.data(), code.size(), chunkName.c_str());
     if (result != LUA_OK) {
-        return Failure(GetLuaError(L));
+        const std::string error = GetLuaError(L);
+        diagnostics.Failure(error);
+        return Failure(error);
     }
     if (!PrepareInterruptibleChunk(
             L, -1,
             cancellation || deadline != (Deadline::max)())) {
-        return Failure("Failed to make Lua chunk interruptible");
+        const std::string error = "Failed to make Lua chunk interruptible";
+        diagnostics.Failure(error);
+        return Failure(error);
     }
     if (cancellation &&
         cancellation->load(std::memory_order_acquire)) {
-        return Failure("Lua execution cancelled");
+        const std::string error = "Lua execution cancelled";
+        diagnostics.Failure(error);
+        return Failure(error);
     }
     if (DeadlineExpired(deadline)) {
-        return Failure("Lua execution timed out");
+        const std::string error = "Lua execution timed out";
+        diagnostics.Failure(error);
+        return Failure(error);
     }
 
     LuaExecutionControl control{deadline, cancellation};
     LuaExecutionModeBinding mode(L, ExecutionMode::GuiScript);
     LuaOperationBinding operation(L, *memService_, cancellation, deadline);
     LuaHookBinding hook(L, control);
-    result = lua_pcall(L, 0, 0, 0);
+    result = ProtectedLuaCall(L, 0, 0);
     if (result != LUA_OK) {
-        return Failure(ExecutionFailureMessage(control, GetLuaError(L)));
+        const std::string error =
+            ExecutionFailureMessage(control, GetLuaError(L));
+        diagnostics.Failure(error);
+        return Failure(error);
     }
     const std::string interruption =
         ExecutionInterruptionMessage(control);
     if (!interruption.empty()) {
+        diagnostics.Failure(interruption);
         return Failure(interruption);
     }
+    diagnostics.Success();
     return Success();
 }
 
@@ -615,39 +848,54 @@ LuaExecutionResult LuaEngine::ExecuteStringCapture(
     }
 
     LuaStackGuard stackGuard(L);
+    LuaDiagnosticBinding diagnostics(chunkName.c_str(), kIpcModeName);
     int result = luaL_loadbuffer(
         L, code.data(), code.size(), chunkName.c_str());
     if (result != LUA_OK) {
-        return Failure(GetLuaError(L));
+        const std::string error = GetLuaError(L);
+        diagnostics.Failure(error);
+        return Failure(error);
     }
 
     const int chunkIndex = lua_gettop(L);
     if (!PrepareInterruptibleChunk(L, chunkIndex, true)) {
-        return Failure("Failed to make IPC Lua chunk interruptible");
+        const std::string error =
+            "Failed to make IPC Lua chunk interruptible";
+        diagnostics.Failure(error);
+        return Failure(error);
     }
     LuaCaptureContext* capture = PushIpcEnvironment(L, output);
     LuaCaptureDeactivation deactivateCapture(capture);
     if (lua_setfenv(L, chunkIndex) == 0) {
-        return Failure("Failed to create IPC Lua environment");
+        const std::string error = "Failed to create IPC Lua environment";
+        diagnostics.Failure(error);
+        return Failure(error);
     }
     if (DeadlineExpired(deadline)) {
-        return Failure("Lua execution timed out");
+        const std::string error = "Lua execution timed out";
+        diagnostics.Failure(error);
+        return Failure(error);
     }
 
     LuaExecutionControl control{deadline, {}};
     LuaExecutionModeBinding mode(L, ExecutionMode::Ipc);
     LuaOperationBinding operation(L, *memService_, {}, deadline);
     LuaHookBinding hook(L, control);
-    result = lua_pcall(L, 0, 0, 0);
+    result = ProtectedLuaCall(L, 0, 0);
     capture->output = nullptr;
     if (result != LUA_OK) {
-        return Failure(ExecutionFailureMessage(control, GetLuaError(L)));
+        const std::string error =
+            ExecutionFailureMessage(control, GetLuaError(L));
+        diagnostics.Failure(error);
+        return Failure(error);
     }
     const std::string interruption =
         ExecutionInterruptionMessage(control);
     if (!interruption.empty()) {
+        diagnostics.Failure(interruption);
         return Failure(interruption);
     }
+    diagnostics.Success();
     return Success();
 }
 
@@ -688,12 +936,20 @@ LuaExecutionResult LuaEngine::InvokeGuiCallback(
     }
 
     LuaStackGuard stackGuard(L);
+    LuaDiagnosticBinding diagnostics(
+        luaFunctionName.c_str(), kGuiFrameModeName);
     lua_getglobal(L, luaFunctionName.c_str());
     if (!lua_isfunction(L, -1)) {
-        return Failure("Lua function not found: " + luaFunctionName);
+        const std::string error =
+            "Lua function not found: " + luaFunctionName;
+        diagnostics.Failure(error);
+        return Failure(error);
     }
     if (!PrepareInterruptibleChunk(L, -1, true)) {
-        return Failure("Failed to make Lua callback interruptible");
+        const std::string error =
+            "Failed to make Lua callback interruptible";
+        diagnostics.Failure(error);
+        return Failure(error);
     }
     lua_pushinteger(L, windowId);
 
@@ -703,15 +959,27 @@ LuaExecutionResult LuaEngine::InvokeGuiCallback(
     LuaExecutionModeBinding mode(L, ExecutionMode::GuiFrame);
     LuaOperationBinding operation(L, *memService_, {}, deadline);
     LuaHookBinding hook(L, control);
-    const int result = lua_pcall(L, 1, 0, 0);
+    LuaImGuiScopeBinding scopes(L);
+    LuaImGuiErrorBoundary imguiBoundary;
+    const int result = ProtectedLuaCall(L, 1, 0);
+
+    std::string error;
     if (result != LUA_OK) {
-        return Failure(ExecutionFailureMessage(control, GetLuaError(L)));
+        error = ExecutionFailureMessage(control, GetLuaError(L));
+    } else {
+        error = ExecutionInterruptionMessage(control);
     }
-    const std::string interruption =
-        ExecutionInterruptionMessage(control);
-    if (!interruption.empty()) {
-        return Failure(interruption);
+
+    const std::string openScopes = scopes.Finish();
+    const std::string imguiErrors = imguiBoundary.Finish();
+    error = AppendImGuiDiagnostics(
+        std::move(error), openScopes, imguiErrors);
+    if (!error.empty()) {
+        diagnostics.Failure(error);
+        return Failure(error);
     }
+
+    diagnostics.Success();
     return Success();
 }
 
@@ -770,6 +1038,10 @@ LuaEngine::ExecutionMode LuaEngine::CurrentExecutionMode(lua_State* state) {
         return ExecutionMode::None;
     }
     return static_cast<ExecutionMode>(raw);
+}
+
+std::string LuaEngine::GetCrashDiagnostic() {
+    return LuaDiagnostics::BuildCrashReport();
 }
 
 std::string LuaEngine::GetLuaError(lua_State* state) {

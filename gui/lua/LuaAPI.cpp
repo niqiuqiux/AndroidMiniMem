@@ -2,6 +2,7 @@
 #include "LuaAPI_Memory.h"
 #include "LuaAPI_ImGui.h"
 #include "LuaAPI_Assembly.h"
+#include "LuaDiagnostics.h"
 #include "../mem/IMemService.h"
 #include "../socket/socket_io_timeout.h"
 #include "../gui/Gui.h"
@@ -17,6 +18,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <cstdio>
+#include <exception>
+#include <new>
 
 // 辅助函数：将 Lua 值转换为字符串（Lua 5.1 兼容版本）
 static const char* luaL_tolstring_compat(lua_State* L, int idx, size_t* len) {
@@ -95,6 +99,28 @@ constexpr int kLuaSleepPollMs = 50;
 char g_memServiceRegistryKey;
 char g_operationContextRegistryKey;
 
+struct ProtectedLuaFunction {
+    lua_CFunction function = nullptr;
+    const char* apiName = nullptr;
+};
+
+int ProtectedLuaDispatch(lua_State* L) {
+    auto* binding = static_cast<ProtectedLuaFunction*>(
+        lua_touserdata(L, lua_upvalueindex(1)));
+    if (!binding || !binding->function) {
+        return luaL_error(L, "invalid MiniMem Lua API binding");
+    }
+    return LuaAPI::InvokeProtected(L, binding->function, binding->apiName);
+}
+
+void RegisterTableFunction(lua_State* L,
+                           const char* fieldName,
+                           lua_CFunction function,
+                           const char* apiName) {
+    LuaAPI::PushProtectedFunction(L, function, apiName);
+    lua_setfield(L, -2, fieldName);
+}
+
 bool isValidBreakpointSize(uint32_t size) {
     return size == 1 || size == 2 || size == 4 || size == 8;
 }
@@ -160,6 +186,50 @@ void LuaAPI::PushError(lua_State* L, const std::string& msg) {
     lua_pushstring(L, msg.c_str());
 }
 
+void LuaAPI::PushProtectedFunction(lua_State* L,
+                                   lua_CFunction function,
+                                   const char* apiName) {
+    void* storage = lua_newuserdata(L, sizeof(ProtectedLuaFunction));
+    new (storage) ProtectedLuaFunction{function, apiName};
+    lua_pushcclosure(L, ProtectedLuaDispatch, 1);
+}
+
+int LuaAPI::InvokeProtected(lua_State* L,
+                            lua_CFunction function,
+                            const char* apiName) {
+    if (!function) {
+        return luaL_error(L, "invalid MiniMem Lua API function");
+    }
+
+    LuaDiagnostics::BeginHostCall(L, apiName);
+    int resultCount = 0;
+    char exceptionMessage[1024]{};
+    bool failed = false;
+    try {
+        resultCount = function(L);
+    } catch (const std::exception& exception) {
+        const char* what = exception.what();
+        std::snprintf(exceptionMessage, sizeof(exceptionMessage),
+                      "MiniMem host API '%s' raised a C++ exception: %s",
+                      apiName ? apiName : "<unknown>",
+                      what ? what : "<no message>");
+        failed = true;
+    } catch (...) {
+        std::snprintf(exceptionMessage, sizeof(exceptionMessage),
+                      "MiniMem host API '%s' raised an unknown C++ exception",
+                      apiName ? apiName : "<unknown>");
+        failed = true;
+    }
+
+    if (!failed) {
+        LuaDiagnostics::EndHostCall();
+        return resultCount;
+    }
+
+    lua_pushstring(L, exceptionMessage);
+    return lua_error(L);
+}
+
 // ==================== 注册所有API ====================
 void LuaAPI::RegisterAll(lua_State* L, Mem::IMemService& service) {
     lua_pushlightuserdata(L, &g_memServiceRegistryKey);
@@ -171,45 +241,36 @@ void LuaAPI::RegisterAll(lua_State* L, Mem::IMemService& service) {
 
     // 创建process表
     lua_newtable(L);
-    lua_pushcfunction(L, GetProcessList);
-    lua_setfield(L, -2, "list");
-    lua_pushcfunction(L, AttachProcess);
-    lua_setfield(L, -2, "attach");
-    lua_pushcfunction(L, GetCurrentPid);
-    lua_setfield(L, -2, "getCurrent");
+    RegisterTableFunction(L, "list", GetProcessList, "process.list");
+    RegisterTableFunction(L, "attach", AttachProcess, "process.attach");
+    RegisterTableFunction(
+        L, "getCurrent", GetCurrentPid, "process.getCurrent");
     lua_setglobal(L, "process");
 
     // 创建module表
     lua_newtable(L);
-    lua_pushcfunction(L, GetModuleList);
-    lua_setfield(L, -2, "list");
-    lua_pushcfunction(L, GetModuleBase);
-    lua_setfield(L, -2, "getBase");
-    lua_pushcfunction(L, ResolveOffsetChain);
-    lua_setfield(L, -2, "resolveOffsetChain");
+    RegisterTableFunction(L, "list", GetModuleList, "module.list");
+    RegisterTableFunction(L, "getBase", GetModuleBase, "module.getBase");
+    RegisterTableFunction(L, "resolveOffsetChain", ResolveOffsetChain,
+                          "module.resolveOffsetChain");
     lua_setglobal(L, "module");
 
 
     // 创建bp表
     lua_newtable(L);
-    lua_pushcfunction(L, SetBreakpoint);
-    lua_setfield(L, -2, "set");
-    lua_pushcfunction(L, RemoveBreakpoint);
-    lua_setfield(L, -2, "remove");
-    lua_pushcfunction(L, SuspendBreakpoint);
-    lua_setfield(L, -2, "suspend");
-    lua_pushcfunction(L, ResumeBreakpoint);
-    lua_setfield(L, -2, "resume");
-    lua_pushcfunction(L, GetBreakpointInfo);
-    lua_setfield(L, -2, "getInfo");
+    RegisterTableFunction(L, "set", SetBreakpoint, "bp.set");
+    RegisterTableFunction(L, "remove", RemoveBreakpoint, "bp.remove");
+    RegisterTableFunction(L, "suspend", SuspendBreakpoint, "bp.suspend");
+    RegisterTableFunction(L, "resume", ResumeBreakpoint, "bp.resume");
+    RegisterTableFunction(L, "getInfo", GetBreakpointInfo, "bp.getInfo");
     lua_setglobal(L, "bp");
 
     // 全局函数
-    lua_pushcfunction(L, Log);
+    PushProtectedFunction(L, Log, "log");
     lua_setglobal(L, "log");
-    lua_pushcfunction(L, Sleep);
+    PushProtectedFunction(L, Sleep, "sleep");
     lua_setglobal(L, "sleep");
-    lua_pushcfunction(L, GetTime);
+    PushProtectedFunction(L, GetTime, "time");
     lua_setglobal(L, "time");
 
     // 注册 ImGui API
