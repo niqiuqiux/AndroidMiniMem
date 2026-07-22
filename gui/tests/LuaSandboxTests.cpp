@@ -156,6 +156,10 @@ public:
         const Mem::BreakpointHitBatchRequest&) override {
         return unavailable<Mem::BreakpointHitBatch>();
     }
+    Mem::Result<Mem::BreakpointSlotsSnapshot> breakpointSlots(
+        const Mem::OperationContext&, uint32_t) override {
+        return unavailable<Mem::BreakpointSlotsSnapshot>();
+    }
     Mem::Result<Mem::SymbolTable> loadSymbolTable(
         const Mem::OperationContext&,
         const Mem::SymbolTableRequest&) override {

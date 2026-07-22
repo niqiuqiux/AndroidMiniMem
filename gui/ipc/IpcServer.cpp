@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
+#include <system_error>
 
 namespace {
 constexpr uint32_t kMaxIpcMemoryTransferBytes = 64 * 1024;
@@ -698,19 +699,6 @@ void IpcServer::RegisterBuiltinMethods() {
             {"type", type.value().type}, {"name", type.value().name}}}};
     });
 
-    // ── init_driver ──────────────────────────────────────────────
-    RegisterMethod("init_driver", [this](const json& p) -> json {
-        std::string card = getStringParam(
-            p, "card", "", true, false, kMaxIpcStringParamBytes);
-        auto result = service_->initializeDriver(
-            service_->captureContext(false),
-            Mem::DriverInitializeRequest{card});
-        if (!result.ok())
-            return serviceFailure(result.error());
-        return {{"success", true}, {"result", {
-            {"message", result.value().message}}}};
-    });
-
     // ── list_processes ───────────────────────────────────────────
     RegisterMethod("list_processes", [this](const json&) -> json {
         const Mem::OperationContext context = service_->captureContext(false);
@@ -940,6 +928,74 @@ void IpcServer::RegisterBuiltinMethods() {
             {{"total_hits", result.value().available},
              {"returned", result.value().items.size()},
              {"dropped", result.value().dropped}, {"hits", arr}}}};
+    });
+
+    // ── query_hwbp_slots ─────────────────────────────────────────
+    RegisterMethod("query_hwbp_slots", [this](const json& p) -> json {
+        const uint32_t capacity = getPositiveSizeParam(
+            p, "capacity", Mem::kMaxBreakpointQueryEntries,
+            Mem::kMaxBreakpointQueryEntries);
+        auto result = service_->breakpointSlots(
+            service_->captureContext(true), capacity);
+        if (!result.ok())
+            return serviceFailure(result.error());
+
+        json threadArray = json::array();
+        size_t successfulThreads = 0;
+        size_t failedThreads = 0;
+        size_t returnedSlots = 0;
+        for (const auto& thread : result.value().threads) {
+            json slots = json::array();
+            for (const auto& slot : thread.slots) {
+                slots.push_back({
+                    {"event_id", formatAddress(slot.eventId)},
+                    {"module_handle", formatAddress(slot.moduleHandle)},
+                    {"address", formatAddress(slot.address)},
+                    {"tid", slot.tid},
+                    {"on_cpu", slot.onCpu},
+                    {"type", slot.type},
+                    {"length", slot.length},
+                    {"state", slot.state},
+                    {"source", slot.source},
+                    {"flags", slot.flags}
+                });
+            }
+            returnedSlots += slots.size();
+            if (thread.querySucceeded) {
+                ++successfulThreads;
+            } else {
+                ++failedThreads;
+            }
+            json item = {
+                {"tid", thread.tid},
+                {"query_succeeded", thread.querySucceeded},
+                {"error_code", thread.errorCode},
+                {"total_count", thread.totalCount},
+                {"count", thread.count},
+                {"brp_count", thread.brpCount},
+                {"wrp_count", thread.wrpCount},
+                {"enabled_count", thread.enabledCount},
+                {"active_count", thread.activeCount},
+                {"perf_count", thread.perfCount},
+                {"ptrace_count", thread.ptraceCount},
+                {"module_count", thread.moduleCount},
+                {"slots", std::move(slots)}
+            };
+            if (!thread.querySucceeded && thread.errorCode != 0) {
+                item["error"] = std::error_code(
+                    thread.errorCode, std::generic_category()).message();
+            }
+            threadArray.push_back(std::move(item));
+        }
+        return {{"success", true}, {"result", {
+            {"pid", result.value().target.pid},
+            {"capacity", capacity},
+            {"thread_count", result.value().threads.size()},
+            {"successful_threads", successfulThreads},
+            {"failed_threads", failedThreads},
+            {"returned_slots", returnedSlots},
+            {"threads", std::move(threadArray)}
+        }}};
     });
     // ── execute_lua ───────────────────────────────────────────────
 #ifdef HAVE_LUAJIT

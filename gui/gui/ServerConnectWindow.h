@@ -26,6 +26,7 @@ private:
 	int currentMemType;
 	char cardKeyBuf[256]{};
 	char KernelVersionBuf = '6';
+	bool kernelBreakpointForceReclaim = false;
 	std::string driverStatus;
 	std::string memTypeNames[5];
 	Mem::IMemService& service_;

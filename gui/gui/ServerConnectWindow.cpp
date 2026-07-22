@@ -92,16 +92,21 @@ void ServerConnectWindow::initializeDriver()
 		Gui::log("驱动初始化失败: 卡密不能为空");
 		return;
 	}
+
+	saveConfig();
 	
 	Gui::log("正在初始化驱动");
 	cardKey = cardKey +"-"+ kernelVersion;
 	Mem::DriverInitializeRequest request;
 	request.card = cardKey;
+	request.forceReclaimHardwareBreakpoints = kernelBreakpointForceReclaim;
 	auto result = service_.initializeDriver(
 		service_.captureContext(false), request);
 	if (result.ok()) {
 		driverStatus = "初始化成功: " + result.value().message;
 		Gui::log("驱动初始化成功: %s", result.value().message.c_str());
+		Gui::log("断点槽抢占: %s",
+		         kernelBreakpointForceReclaim ? "已开启" : "已关闭");
 		// 初始化成功后更新MemType
 		updateMemType();
 	} else {
@@ -176,6 +181,9 @@ void ServerConnectWindow::drawDriverControls() {
   // 卡密输入和驱动初始化
   ImGui::InputText("卡密", cardKeyBuf, IM_ARRAYSIZE(cardKeyBuf),
                    ImGuiInputTextFlags_Password);
+  if (ImGui::IsItemDeactivatedAfterEdit()) {
+    saveConfig();
+  }
   // 列表显示5 6
   const char *kernelVersionList[] = {"5系", "6系"};
   int currentKernelVersion = (KernelVersionBuf == '5') ? 0 : 1;
@@ -190,6 +198,10 @@ void ServerConnectWindow::drawDriverControls() {
   
   // 如果配置改变，保存配置
   if (kernelVersionChanged) {
+    saveConfig();
+  }
+
+  if (ImGui::Checkbox("断点槽抢占", &kernelBreakpointForceReclaim)) {
     saveConfig();
   }
 
@@ -219,16 +231,15 @@ void ServerConnectWindow::loadConfig()
 	port = config.getInt("port", port);
 	autoReconnect = config.getInt("autoReconnect", autoReconnect ? 1 : 0) != 0;
 
-	// 旧版本曾明文保存卡密，加载时主动清除遗留配置。
-	const bool removedLegacyCard = config.remove("cardKey");
+	std::string cardKey = config.getString("cardKey", "");
+	std::snprintf(cardKeyBuf, sizeof(cardKeyBuf), "%s", cardKey.c_str());
 
 	// 加载内核版本
 	KernelVersionBuf = config.getChar("kernelVersion", '6');
+	kernelBreakpointForceReclaim =
+		config.getInt("kernelBreakpointForceReclaim", 0) != 0;
 
 	Gui::log("配置已加载 (host=%s:%d, 内核=%c系)", hostBuf, port, KernelVersionBuf);
-	if (removedLegacyCard && !config.saveConfig("config.ini")) {
-		Gui::log("旧版卡密配置清理失败: 无法写入 config.ini");
-	}
 }
 
 void ServerConnectWindow::saveConfig()
@@ -239,9 +250,12 @@ void ServerConnectWindow::saveConfig()
 	config.setString("host", std::string(hostBuf));
 	config.setInt("port", port);
 	config.setInt("autoReconnect", autoReconnect ? 1 : 0);
+	config.setString("cardKey", std::string(cardKeyBuf));
 
 	// 保存内核版本
 	config.setChar("kernelVersion", KernelVersionBuf);
+	config.setInt("kernelBreakpointForceReclaim",
+	              kernelBreakpointForceReclaim ? 1 : 0);
 
 	// 保存到文件
 	if (config.saveConfig("config.ini")) {

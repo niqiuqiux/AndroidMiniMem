@@ -85,6 +85,7 @@ struct DisconnectReceipt {
 
 struct DriverInitializeRequest {
     std::string card;
+    bool forceReclaimHardwareBreakpoints = false;
 };
 
 struct DriverInitializationBackendResult {
@@ -92,6 +93,10 @@ struct DriverInitializationBackendResult {
     bool responseReceived = false;
     bool accepted = false;
     std::string message;
+    // 驱动初始化成功后的 Kernel 断点槽抢占策略同步结果。
+    bool reclaimRequestStarted = false;
+    bool reclaimResponseReceived = false;
+    bool reclaimApplied = false;
 };
 
 struct DriverInitializationReceipt {
@@ -276,6 +281,40 @@ struct BreakpointHitBatch {
     TargetSnapshot target;
 };
 
+struct BreakpointSlot {
+    uint64_t eventId = 0;
+    uint64_t moduleHandle = 0;
+    uint64_t address = 0;
+    int32_t tid = 0;
+    int32_t onCpu = 0;
+    uint32_t type = 0;
+    uint32_t length = 0;
+    uint32_t state = 0;
+    uint32_t source = 0;
+    uint32_t flags = 0;
+};
+
+struct BreakpointThreadSlots {
+    int32_t tid = 0;
+    bool querySucceeded = false;
+    int32_t errorCode = 0;
+    uint32_t count = 0;
+    uint32_t totalCount = 0;
+    uint32_t brpCount = 0;
+    uint32_t wrpCount = 0;
+    uint32_t enabledCount = 0;
+    uint32_t activeCount = 0;
+    uint32_t perfCount = 0;
+    uint32_t ptraceCount = 0;
+    uint32_t moduleCount = 0;
+    std::vector<BreakpointSlot> slots;
+};
+
+struct BreakpointSlotsSnapshot {
+    std::vector<BreakpointThreadSlots> threads;
+    TargetSnapshot target;
+};
+
 struct SymbolInfo {
     uint64_t address = 0;
     std::string name;
@@ -332,6 +371,8 @@ inline constexpr size_t kMaxSymbolPageSize = 1000;
 inline constexpr size_t kMaxSymbolCount = 1000000;
 inline constexpr size_t kMaxSymbolNameBytesTotal = 64u * 1024u * 1024u;
 inline constexpr size_t kMaxBreakpointHitCount = 100000;
+inline constexpr uint32_t kMaxBreakpointQueryEntries = 64;
+inline constexpr size_t kMaxBreakpointQueryThreads = 65536;
 inline constexpr size_t kMaxTextBytes = 4096;
 inline constexpr size_t kMaxDriverCardBytes = 4096;
 

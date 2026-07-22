@@ -51,6 +51,10 @@
 // —— 模块快捷查询 ——
 #define CMD_GETSOBASE                21
 
+// —— Kernel 断点策略 ——
+#define CMD_SETKERNELHWBPRECLAIM     22
+#define CMD_KERNEL_QUERYHWBPTHREADS  23
+
 
 #pragma pack(1)
 struct CeVersion {
@@ -161,6 +165,42 @@ struct CeGetSoBaseOutput {
     int result;
     uint64_t base;
 };
+
+#pragma pack(push, 1)
+struct HwbpTaskThreadHeader {
+    int32_t tid;
+    int32_t queryResult;
+    int32_t errorCode;
+    uint32_t count;
+    uint32_t totalCount;
+    uint32_t brpCount;
+    uint32_t wrpCount;
+    uint32_t enabledCount;
+    uint32_t activeCount;
+    uint32_t perfCount;
+    uint32_t ptraceCount;
+    uint32_t moduleCount;
+};
+
+struct HwbpTaskSlot {
+    uint64_t eventId;
+    uint64_t moduleHandle;
+    uint64_t address;
+    int32_t tid;
+    int32_t onCpu;
+    uint32_t type;
+    uint32_t length;
+    uint32_t state;
+    uint32_t source;
+    uint32_t flags;
+    uint32_t reserved;
+};
+#pragma pack(pop)
+
+static_assert(sizeof(HwbpTaskThreadHeader) == 48,
+              "HwbpTaskThreadHeader ABI size mismatch");
+static_assert(sizeof(HwbpTaskSlot) == 56,
+              "HwbpTaskSlot ABI size mismatch");
 
 #pragma pack()
 

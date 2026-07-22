@@ -146,6 +146,15 @@ enum MemType {
 bool FetchServerVersion(ServerVersionInfo &outInfo, PortType type = PORT_MAIN);
 bool GetMemType(int &outType, PortType type = PORT_MAIN);
 
+struct KernelBreakpointReclaimIoResult {
+  bool requestStarted = false;
+  bool responseReceived = false;
+  bool applied = false;
+};
+
+KernelBreakpointReclaimIoResult SetKernelBreakpointForceReclaim(
+    bool enabled, PortType type = PORT_MAIN);
+
 struct DriverInitializationIoResult {
   bool requestStarted = false;
   bool responseReceived = false;
@@ -241,6 +250,39 @@ bool ResumeKernelBreakpoint(uint64_t address, PortType type = PORT_MAIN);
 bool ReadKernelBreakpointInfo(uint64_t address, std::vector<HW_HIT_INFO> &infos,
                               PortType type = PORT_MAIN,
                               uint64_t *outTotalHits = nullptr);  // 回传设备累计命中数
+
+struct KernelBreakpointSlotInfo {
+  uint64_t eventId = 0;
+  uint64_t moduleHandle = 0;
+  uint64_t address = 0;
+  int32_t tid = 0;
+  int32_t onCpu = 0;
+  uint32_t type = 0;
+  uint32_t length = 0;
+  uint32_t state = 0;
+  uint32_t source = 0;
+  uint32_t flags = 0;
+};
+
+struct KernelBreakpointThreadInfo {
+  int32_t tid = 0;
+  bool querySucceeded = false;
+  int32_t errorCode = 0;
+  uint32_t count = 0;
+  uint32_t totalCount = 0;
+  uint32_t brpCount = 0;
+  uint32_t wrpCount = 0;
+  uint32_t enabledCount = 0;
+  uint32_t activeCount = 0;
+  uint32_t perfCount = 0;
+  uint32_t ptraceCount = 0;
+  uint32_t moduleCount = 0;
+  std::vector<KernelBreakpointSlotInfo> slots;
+};
+
+bool QueryKernelBreakpointThreads(
+    std::vector<KernelBreakpointThreadInfo>& threads,
+    uint32_t capacity = 64, PortType type = PORT_MAIN);
 bool ClearTrackedKernelBreakpoints(PortType type = PORT_MAIN);
 void ResetTrackedKernelBreakpoints();
 

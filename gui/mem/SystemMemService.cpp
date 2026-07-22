@@ -215,7 +215,8 @@ public:
 
     DriverInitializationBackendResult initializeDriver(
         const OperationContext& context,
-        const std::string& card) override {
+        const std::string& card,
+        bool forceReclaimHardwareBreakpoints) override {
         SocketCommand::TransactionLease transaction(PORT_MAIN);
         if (!transaction ||
             transaction.generation() != context.connectionGeneration) {
@@ -228,6 +229,21 @@ public:
         result.responseReceived = io.responseReceived;
         result.accepted = io.accepted;
         result.message = io.message;
+        if (!io.accepted) {
+            return result;
+        }
+
+        const KernelBreakpointReclaimIoResult reclaim =
+            SetKernelBreakpointForceReclaim(
+                forceReclaimHardwareBreakpoints, PORT_MAIN);
+        result.reclaimRequestStarted = reclaim.requestStarted;
+        result.reclaimResponseReceived = reclaim.responseReceived;
+        result.reclaimApplied = reclaim.applied;
+        if (!reclaim.responseReceived) {
+            result.message = "driver initialized; breakpoint reclaim configuration response missing";
+        } else if (!reclaim.applied) {
+            result.message = "driver initialized; breakpoint reclaim configuration rejected";
+        }
         return result;
     }
 
@@ -414,6 +430,45 @@ public:
             hit.originalX0 = raw[i].regs_info.orig_x0;
             hit.syscallNumber = raw[i].regs_info.syscallno;
             hits.push_back(std::move(hit));
+        }
+        return true;
+    }
+
+    bool fetchBreakpointSlots(
+        const OperationContext& context, uint32_t capacity,
+        std::vector<BreakpointThreadSlots>& threads) override {
+        SocketCommand::TransactionLease transaction(PORT_MAIN);
+        if (!contextMatches(context, transaction)) {
+            return false;
+        }
+        std::vector<KernelBreakpointThreadInfo> raw;
+        if (!QueryKernelBreakpointThreads(raw, capacity, PORT_MAIN)) {
+            return false;
+        }
+        threads.clear();
+        threads.reserve(raw.size());
+        for (auto& source : raw) {
+            BreakpointThreadSlots thread;
+            thread.tid = source.tid;
+            thread.querySucceeded = source.querySucceeded;
+            thread.errorCode = source.errorCode;
+            thread.count = source.count;
+            thread.totalCount = source.totalCount;
+            thread.brpCount = source.brpCount;
+            thread.wrpCount = source.wrpCount;
+            thread.enabledCount = source.enabledCount;
+            thread.activeCount = source.activeCount;
+            thread.perfCount = source.perfCount;
+            thread.ptraceCount = source.ptraceCount;
+            thread.moduleCount = source.moduleCount;
+            thread.slots.reserve(source.slots.size());
+            for (const auto& slot : source.slots) {
+                thread.slots.push_back(BreakpointSlot{
+                    slot.eventId, slot.moduleHandle, slot.address, slot.tid,
+                    slot.onCpu, slot.type, slot.length, slot.state,
+                    slot.source, slot.flags});
+            }
+            threads.push_back(std::move(thread));
         }
         return true;
     }

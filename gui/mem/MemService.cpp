@@ -11,6 +11,7 @@ namespace Mem {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+constexpr int kKernelMemoryType = 3;
 
 std::string trimAscii(const std::string& value) {
     size_t begin = 0;
@@ -383,7 +384,8 @@ Result<DriverInitializationReceipt> MemService::initializeDriver(
         return failureFrom<DriverInitializationReceipt>(*error);
     }
     const DriverInitializationBackendResult backendResult =
-        backend_.initializeDriver(context, request.card);
+        backend_.initializeDriver(
+            context, request.card, request.forceReclaimHardwareBreakpoints);
     if (!backendResult.responseReceived) {
         if (backendResult.requestStarted) {
             return Result<DriverInitializationReceipt>::failure(
@@ -404,6 +406,24 @@ Result<DriverInitializationReceipt> MemService::initializeDriver(
             backendResult.message.empty()
                 ? "Android server rejected driver initialization"
                 : backendResult.message,
+            false);
+    }
+    if (!backendResult.reclaimResponseReceived) {
+        if (backendResult.reclaimRequestStarted) {
+            return Result<DriverInitializationReceipt>::failure(
+                ErrorCode::CompletionUnknown,
+                "driver initialized, but Kernel breakpoint reclaim configuration completion could not be confirmed; reconnect before continuing",
+                false);
+        }
+        return Result<DriverInitializationReceipt>::failure(
+            ErrorCode::ProtocolError,
+            "driver initialized, but Kernel breakpoint reclaim configuration could not be sent",
+            true);
+    }
+    if (!backendResult.reclaimApplied) {
+        return Result<DriverInitializationReceipt>::failure(
+            ErrorCode::ProtocolError,
+            "driver initialized, but Kernel breakpoint reclaim configuration was rejected",
             false);
     }
     if (const auto error = validateContext(context, true, false, false)) {
@@ -1086,6 +1106,81 @@ Result<BreakpointHitBatch> MemService::breakpointHits(
     batch.target = *context.target;
     breakpointHitTotals_[request.address] = total;
     return Result<BreakpointHitBatch>::success(std::move(batch));
+}
+
+Result<BreakpointSlotsSnapshot> MemService::breakpointSlots(
+    const OperationContext& context, uint32_t capacity) {
+    if (capacity == 0 || capacity > kMaxBreakpointQueryEntries) {
+        return Result<BreakpointSlotsSnapshot>::failure(
+            ErrorCode::InvalidArgument,
+            "breakpoint slot capacity must be between 1 and 64");
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<BreakpointSlotsSnapshot>(*error);
+    }
+
+    // hwbp_query_task 是驱动接口，只允许在 Kernel 后端使用；在服务边界
+    // 明确拒绝其它读写模式，避免把失败误报成普通协议错误。
+    int memoryType = 0;
+    std::string memoryTypeName;
+    if (!backend_.fetchMemoryType(memoryType, memoryTypeName)) {
+        return Result<BreakpointSlotsSnapshot>::failure(
+            ErrorCode::ProtocolError,
+            "failed to query current memory mode", true);
+    }
+    if (memoryType != kKernelMemoryType) {
+        return Result<BreakpointSlotsSnapshot>::failure(
+            ErrorCode::PermissionDenied,
+            "hwbp_query_task requires Kernel memory mode");
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<BreakpointSlotsSnapshot>(*error);
+    }
+
+    std::lock_guard<std::mutex> lock(breakpointMutex_);
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<BreakpointSlotsSnapshot>(*error);
+    }
+    std::vector<BreakpointThreadSlots> threads;
+    if (!backend_.fetchBreakpointSlots(context, capacity, threads)) {
+        if (const auto error = validateContext(context, true, true, false)) {
+            return failureFrom<BreakpointSlotsSnapshot>(*error);
+        }
+        return Result<BreakpointSlotsSnapshot>::failure(
+            ErrorCode::ProtocolError,
+            "failed to query hardware breakpoint slots", true);
+    }
+    if (threads.size() > kMaxBreakpointQueryThreads) {
+        return Result<BreakpointSlotsSnapshot>::failure(
+            ErrorCode::ProtocolError,
+            "hardware breakpoint slot response contains too many threads");
+    }
+    for (const auto& thread : threads) {
+        if (thread.tid <= 0 || thread.count > capacity ||
+            thread.count != thread.slots.size() ||
+            thread.totalCount < thread.count ||
+            thread.brpCount > thread.totalCount ||
+            thread.wrpCount > thread.totalCount ||
+            thread.enabledCount > thread.totalCount ||
+            thread.activeCount > thread.totalCount ||
+            thread.perfCount > thread.totalCount ||
+            thread.ptraceCount > thread.totalCount ||
+            thread.moduleCount > thread.totalCount ||
+            (thread.querySucceeded && thread.errorCode != 0) ||
+            (!thread.querySucceeded &&
+             (thread.count != 0 || thread.errorCode <= 0))) {
+            return Result<BreakpointSlotsSnapshot>::failure(
+                ErrorCode::ProtocolError,
+                "hardware breakpoint slot response is inconsistent");
+        }
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<BreakpointSlotsSnapshot>(*error);
+    }
+    BreakpointSlotsSnapshot snapshot;
+    snapshot.threads = std::move(threads);
+    snapshot.target = *context.target;
+    return Result<BreakpointSlotsSnapshot>::success(std::move(snapshot));
 }
 
 Result<SymbolTable> MemService::loadSymbolTable(

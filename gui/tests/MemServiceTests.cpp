@@ -92,9 +92,10 @@ public:
     size_t lastSymbolFetchLimit = 0;
     Mem::MemoryWriteBackendResult writeResult{true, true, 4};
     Mem::DriverInitializationBackendResult driverResult{
-        true, true, true, "initialized"};
+        true, true, true, "initialized", true, true, true};
     int driverCalls = 0;
     std::string lastDriverCard;
+    bool lastDriverForceReclaim = false;
     uint64_t lastDriverContextGeneration = 0;
     bool cancelDuringDriver = false;
     bool changeGenerationAfterDriver = false;
@@ -115,6 +116,11 @@ public:
     Mem::BreakpointMutationBackendResult breakpointResult{true, true, true};
     bool changeGenerationAfterBreakpoint = false;
     size_t breakpointTotal = 1;
+    int memoryType = 2;
+    std::vector<Mem::BreakpointThreadSlots> breakpointSlotResponse;
+    bool breakpointSlotFetchSucceeds = true;
+    bool changeGenerationAfterBreakpointSlotQuery = false;
+    uint32_t lastBreakpointSlotCapacity = 0;
     bool transactionValid = true;
     bool useBatchResultOverride = false;
     std::vector<Mem::MemoryBlock> batchResultOverride;
@@ -172,8 +178,8 @@ public:
     }
 
     bool fetchMemoryType(int& type, std::string& name) override {
-        type = 2;
-        name = "Syscall";
+        type = memoryType;
+        name = type == 3 ? "Kernel" : "Syscall";
         if (changeGenerationAfterMemoryType)
             ++generation;
         return true;
@@ -181,9 +187,11 @@ public:
 
     Mem::DriverInitializationBackendResult initializeDriver(
         const Mem::OperationContext& context,
-        const std::string& card) override {
+        const std::string& card,
+        bool forceReclaimHardwareBreakpoints) override {
         ++driverCalls;
         lastDriverCard = card;
+        lastDriverForceReclaim = forceReclaimHardwareBreakpoints;
         lastDriverContextGeneration = context.connectionGeneration;
         if (driverDelayMs > 0) {
             std::this_thread::sleep_for(
@@ -307,6 +315,16 @@ public:
         hits = {hit};
         total = breakpointTotal;
         return true;
+    }
+
+    bool fetchBreakpointSlots(
+        const Mem::OperationContext&, uint32_t capacity,
+        std::vector<Mem::BreakpointThreadSlots>& threads) override {
+        lastBreakpointSlotCapacity = capacity;
+        threads = breakpointSlotResponse;
+        if (changeGenerationAfterBreakpointSlotQuery)
+            ++generation;
+        return breakpointSlotFetchSucceeds;
     }
 };
 
@@ -563,11 +581,28 @@ void testDriverInitializationSemantics() {
 
     const std::string secret = "test-card-secret";
     const auto completed = service.initializeDriver(
-        context, Mem::DriverInitializeRequest{secret});
+        context, Mem::DriverInitializeRequest{secret, true});
     check(completed.ok() && backend.lastDriverCard == secret &&
+              backend.lastDriverForceReclaim &&
               backend.lastDriverContextGeneration == 1 &&
               completed.value().connectionGeneration == 1,
           "confirmed driver initialization returns a connection receipt");
+
+    backend.driverResult = {
+        true, true, true, "initialized", true, false, false};
+    const auto reclaimUnknown = service.initializeDriver(
+        context, Mem::DriverInitializeRequest{secret, true});
+    check(!reclaimUnknown.ok() &&
+              reclaimUnknown.error().code ==
+                  Mem::ErrorCode::CompletionUnknown,
+          "unconfirmed breakpoint reclaim configuration is completion unknown");
+
+    backend.driverResult.reclaimResponseReceived = true;
+    const auto reclaimRejected = service.initializeDriver(
+        context, Mem::DriverInitializeRequest{secret, true});
+    check(!reclaimRejected.ok() &&
+              reclaimRejected.error().code == Mem::ErrorCode::ProtocolError,
+          "rejected breakpoint reclaim configuration is reported");
 
     backend.driverResult = {};
     const auto unsent = service.initializeDriver(
@@ -598,6 +633,9 @@ void testDriverInitializationSemantics() {
 
     backend.driverResult.accepted = true;
     backend.driverResult.message = "initialized";
+    backend.driverResult.reclaimRequestStarted = true;
+    backend.driverResult.reclaimResponseReceived = true;
+    backend.driverResult.reclaimApplied = true;
     backend.cancelDuringDriver = true;
     Mem::OperationContext cancelledContext = context;
     cancelledContext.cancellation =
@@ -859,6 +897,64 @@ void testProcessSymbolsAndBreakpoints() {
           "breakpoint dropped count uses the cumulative delta between polls");
 }
 
+void testBreakpointSlotQuery() {
+    FakeBackend backend;
+    Mem::MemService service(backend);
+    const auto context = service.captureContext(true);
+
+    const auto nonKernel = service.breakpointSlots(context);
+    check(!nonKernel.ok() &&
+              nonKernel.error().code == Mem::ErrorCode::PermissionDenied,
+          "breakpoint slot query explicitly rejects non-Kernel mode");
+
+    backend.memoryType = 3;
+    Mem::BreakpointThreadSlots queried;
+    queried.tid = 42;
+    queried.querySucceeded = true;
+    queried.count = 1;
+    queried.totalCount = 1;
+    queried.brpCount = 1;
+    queried.enabledCount = 1;
+    queried.activeCount = 1;
+    queried.perfCount = 1;
+    queried.slots.push_back(Mem::BreakpointSlot{
+        0x11, 0x22, 0x1234, 42, 3, 4, 4, 6, 0, 3});
+
+    Mem::BreakpointThreadSlots exited;
+    exited.tid = 43;
+    exited.querySucceeded = false;
+    exited.errorCode = 3;
+    backend.breakpointSlotResponse = {queried, exited};
+
+    const auto snapshot = service.breakpointSlots(context, 64);
+    check(snapshot.ok() && snapshot.value().target == *context.target &&
+              snapshot.value().threads.size() == 2 &&
+              snapshot.value().threads[0].slots.size() == 1 &&
+              snapshot.value().threads[1].errorCode == 3 &&
+              backend.lastBreakpointSlotCapacity == 64,
+          "breakpoint slot query preserves successful slots and per-TID errors");
+
+    const auto invalid = service.breakpointSlots(context, 0);
+    check(!invalid.ok() &&
+              invalid.error().code == Mem::ErrorCode::InvalidArgument,
+          "breakpoint slot query validates per-thread capacity");
+
+    backend.breakpointSlotFetchSucceeds = false;
+    const auto failed = service.breakpointSlots(context);
+    check(!failed.ok() &&
+              failed.error().code == Mem::ErrorCode::ProtocolError &&
+              failed.error().retryable,
+          "breakpoint slot backend failure remains retryable");
+
+    backend.breakpointSlotFetchSucceeds = true;
+    backend.changeGenerationAfterBreakpointSlotQuery = true;
+    const auto replacedConnection = service.breakpointSlots(context);
+    check(!replacedConnection.ok() &&
+              replacedConnection.error().code ==
+                  Mem::ErrorCode::ConnectionChanged,
+          "breakpoint slot query rejects a result from a replaced connection");
+}
+
 } // namespace
 
 int main() {
@@ -871,6 +967,7 @@ int main() {
     testWriteCompletionSemantics();
     testBreakpointCompletionSemantics();
     testProcessSymbolsAndBreakpoints();
+    testBreakpointSlotQuery();
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";
         return 1;

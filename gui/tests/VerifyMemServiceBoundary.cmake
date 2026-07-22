@@ -19,6 +19,7 @@ set(protocol_markers
     "FetchServerVersion\\("
     "GetMemType\\("
     "InitDriver\\("
+    "SetKernelBreakpointForceReclaim\\("
     "FetchProcessList\\("
     "OpenProcessHandle\\("
     "CloseProcessHandle\\("
@@ -32,6 +33,7 @@ set(protocol_markers
     "SuspendKernelBreakpoint\\("
     "ResumeKernelBreakpoint\\("
     "ReadKernelBreakpointInfo"
+    "QueryKernelBreakpointThreads\\("
     "Symbol(Init|GetList|Find)\\(")
 
 foreach(source IN LISTS frontend_sources)
@@ -201,10 +203,7 @@ file(READ "${SOURCE_ROOT}/gui/ServerConnectWindow.h" connect_window_header)
 set(connect_window_content
     "${connect_window_source}\n${connect_window_header}")
 foreach(forbidden IN ITEMS
-        "cardKeyBuf[256] = \""
-        "getString(\"cardKey\""
-        "setString(\"cardKey\""
-        "cardKey.c_str()")
+        "cardKeyBuf[256] = \"")
     string(FIND "${connect_window_content}" "${forbidden}" position)
     if(NOT position EQUAL -1)
         message(FATAL_ERROR
@@ -212,16 +211,32 @@ foreach(forbidden IN ITEMS
     endif()
 endforeach()
 foreach(required IN ITEMS
-        "ImGuiInputTextFlags_Password"
-        "config.remove(\"cardKey\")")
+		"ImGuiInputTextFlags_Password"
+		"config.getString(\"cardKey\""
+		"config.setString(\"cardKey\""
+		"config.getInt(\"kernelBreakpointForceReclaim\""
+		"config.setInt(\"kernelBreakpointForceReclaim\"")
     string(FIND "${connect_window_content}" "${required}" position)
     if(position EQUAL -1)
         message(FATAL_ERROR
-            "driver card secret protection is missing: ${required}")
+            "driver card local persistence is missing: ${required}")
     endif()
 endforeach()
 
+string(FIND "${ipc_server_source}" "RegisterMethod(\"init_driver\"" init_driver_ipc_position)
+if(NOT init_driver_ipc_position EQUAL -1)
+    message(FATAL_ERROR
+        "driver initialization must remain a GUI-only operation")
+endif()
+
 get_filename_component(project_root "${SOURCE_ROOT}" DIRECTORY)
+file(READ "${project_root}/mcp/minimem_mcp/tools/status.py" mcp_status_source)
+string(FIND "${mcp_status_source}" "def init_driver(" init_driver_tool_position)
+if(NOT init_driver_tool_position EQUAL -1)
+    message(FATAL_ERROR
+        "MCP must not expose GUI driver initialization")
+endif()
+
 file(READ "${project_root}/engine/ceserver/api.cpp" engine_api_source)
 foreach(forbidden IN ITEMS
         "usedParams.c_str()"

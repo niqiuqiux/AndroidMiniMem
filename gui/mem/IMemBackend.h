@@ -53,7 +53,8 @@ public:
     virtual bool fetchMemoryType(int& type, std::string& name) = 0;
     virtual DriverInitializationBackendResult initializeDriver(
         const OperationContext& context,
-        const std::string& card) = 0;
+        const std::string& card,
+        bool forceReclaimHardwareBreakpoints) = 0;
     virtual bool fetchProcesses(const OperationContext& context,
                                 std::vector<ProcessInfo>& processes) = 0;
     virtual bool openProcess(const OperationContext& context,
@@ -94,6 +95,9 @@ public:
                                      size_t limit,
                                      std::vector<BreakpointHit>& hits,
                                      size_t& total) = 0;
+    virtual bool fetchBreakpointSlots(
+        const OperationContext& context, uint32_t capacity,
+        std::vector<BreakpointThreadSlots>& threads) = 0;
 };
 
 } // namespace Mem

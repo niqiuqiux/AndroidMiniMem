@@ -24,34 +24,36 @@ int main() {
     {
         std::ofstream output(path, std::ios::trunc);
         output << "host=127.0.0.1\n"
-               << "cardKey=legacy-plaintext-secret\n"
+               << "cardKey=saved-card-value\n"
                << "kernelVersion=6\n";
     }
 
     auto& config = ConfigManager::getInstance();
-    check(config.loadConfig(path), "legacy configuration should load");
-    check(config.remove("cardKey"),
-          "legacy plaintext card entry should be removed");
-    check(!config.remove("cardKey"),
-          "removing a missing card entry should be idempotent");
-    check(config.saveConfig(path), "sanitized configuration should save");
+    check(config.loadConfig(path), "configuration should load");
+    check(config.getString("cardKey") == "saved-card-value",
+          "saved card should be loaded");
+    config.setString("cardKey", "updated-card-value");
+    check(config.saveConfig(path), "configuration should save");
+
+    check(config.loadConfig(path), "saved configuration should reload");
+    check(config.getString("cardKey") == "updated-card-value",
+          "updated card should survive a save and reload");
 
     std::ifstream input(path);
     std::ostringstream contents;
     contents << input.rdbuf();
     const std::string text = contents.str();
-    check(text.find("cardKey") == std::string::npos &&
-              text.find("legacy-plaintext-secret") == std::string::npos,
-          "saved configuration must not contain the card key or its value");
+    check(text.find("cardKey=updated-card-value") != std::string::npos,
+          "saved configuration should contain the card value");
     check(text.find("host=127.0.0.1") != std::string::npos &&
               text.find("kernelVersion=6") != std::string::npos,
-          "sanitizing the card entry should preserve ordinary settings");
+          "saving the card should preserve ordinary settings");
 
     (void)std::remove(path.c_str());
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";
         return 1;
     }
-    std::cout << "Config security tests passed\n";
+    std::cout << "Config persistence tests passed\n";
     return 0;
 }

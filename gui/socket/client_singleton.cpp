@@ -1,5 +1,6 @@
 #include "client_singleton.h"
 #include "client.hpp"
+#include "SocketCommand.h"
 #include "socket_request_manager.h"
 #include "../gui/AppContext.h"
 #include <iostream>
@@ -102,6 +103,27 @@ void WinSocketClientMgr::DisconnectMultiPort() {
 
 bool WinSocketClientMgr::IsMultiPortConnected() const {
   return DeviceSession::GetInstance().IsConnected();
+}
+
+KernelBreakpointReclaimIoResult SetKernelBreakpointForceReclaim(
+    bool enabled, PortType type) {
+  KernelBreakpointReclaimIoResult result;
+  int serverResult = 0;
+  (void)SocketCommand::executeNoHandle(
+      type, [&](WindowsSocketClient* client) -> bool {
+        result.requestStarted = true;
+        const unsigned char command = CMD_SETKERNELHWBPRECLAIM;
+        const unsigned char value = enabled ? 1 : 0;
+        if (!client->Send(&command, sizeof(command)) ||
+            !client->Send(&value, sizeof(value)) ||
+            !client->Receive(&serverResult, sizeof(serverResult))) {
+          return false;
+        }
+        result.responseReceived = true;
+        result.applied = serverResult != 0;
+        return true;
+      });
+  return result;
 }
 
 // ==================== 进程管理 ====================

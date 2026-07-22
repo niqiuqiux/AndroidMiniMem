@@ -7,6 +7,8 @@
 
 namespace {
 constexpr int kMaxBreakpointHitCount = 100000;
+constexpr uint32_t kMaxBreakpointQueryEntries = 64;
+constexpr uint32_t kMaxBreakpointQueryThreads = 65536;
 
 std::mutex g_trackedBreakpointMutex;
 std::vector<uint64_t> g_trackedBreakpointAddresses;
@@ -175,6 +177,86 @@ bool ReadKernelBreakpointInfo(uint64_t address, std::vector<HW_HIT_INFO> &infos,
                 return false;
             infos.swap(receivedInfos);
         }
+        return true;
+    });
+}
+
+bool QueryKernelBreakpointThreads(
+    std::vector<KernelBreakpointThreadInfo>& threads,
+    uint32_t capacity, PortType port) {
+    threads.clear();
+    if (capacity == 0 || capacity > kMaxBreakpointQueryEntries) {
+        return false;
+    }
+
+    return SocketCommand::execute(port, [&](WindowsSocketClient* client, int handle) -> bool {
+        unsigned char command = CMD_KERNEL_QUERYHWBPTHREADS;
+        if (!SocketCommand::sendCommandWithHandle(client, command, handle) ||
+            !client->Send(&capacity, sizeof(capacity))) {
+            return false;
+        }
+        int result = 0;
+        uint32_t threadCount = 0;
+        if (!client->Receive(&result, sizeof(result)) ||
+            !client->Receive(&threadCount, sizeof(threadCount))) {
+            return false;
+        }
+        if ((result != 0 && result != 1) ||
+            (result == 0 && threadCount != 0)) {
+            return SocketCommand::rejectMalformedResponse(client);
+        }
+        if (result == 0) {
+            return false;
+        }
+        if (threadCount > kMaxBreakpointQueryThreads) {
+            return SocketCommand::rejectMalformedResponse(client);
+        }
+
+        std::vector<KernelBreakpointThreadInfo> received;
+        received.reserve(threadCount);
+        for (uint32_t i = 0; i < threadCount; ++i) {
+            HwbpTaskThreadHeader header{};
+            if (!client->Receive(&header, sizeof(header))) {
+                return false;
+            }
+            if ((header.queryResult != 0 && header.queryResult != 1) ||
+                header.tid <= 0 || header.count > capacity ||
+                header.count > kMaxBreakpointQueryEntries ||
+                header.totalCount < header.count ||
+                (header.queryResult != 0 && header.errorCode != 0) ||
+                (header.queryResult == 0 && header.errorCode <= 0)) {
+                return SocketCommand::rejectMalformedResponse(client);
+            }
+            KernelBreakpointThreadInfo thread;
+            thread.tid = header.tid;
+            thread.querySucceeded = header.queryResult != 0;
+            thread.errorCode = header.errorCode;
+            thread.count = header.count;
+            thread.totalCount = header.totalCount;
+            thread.brpCount = header.brpCount;
+            thread.wrpCount = header.wrpCount;
+            thread.enabledCount = header.enabledCount;
+            thread.activeCount = header.activeCount;
+            thread.perfCount = header.perfCount;
+            thread.ptraceCount = header.ptraceCount;
+            thread.moduleCount = header.moduleCount;
+            if (!thread.querySucceeded && header.count != 0) {
+                return SocketCommand::rejectMalformedResponse(client);
+            }
+            thread.slots.reserve(header.count);
+            for (uint32_t j = 0; j < header.count; ++j) {
+                HwbpTaskSlot entry{};
+                if (!client->Receive(&entry, sizeof(entry))) {
+                    return false;
+                }
+                thread.slots.push_back(KernelBreakpointSlotInfo{
+                    entry.eventId, entry.moduleHandle, entry.address, entry.tid,
+                    entry.onCpu, entry.type, entry.length, entry.state,
+                    entry.source, entry.flags});
+            }
+            received.push_back(std::move(thread));
+        }
+        threads.swap(received);
         return true;
     });
 }

@@ -65,6 +65,7 @@ MCP ▶ IPC ┘         │ 校验/目标快照/复合事务      │
 - 驱动初始化、内存写入和断点变更都分别记录 `requestStarted`、`responseReceived` 与服务端结果。未发送可安全重试；已发送但响应不完整必须返回 `completion_unknown` 并要求重连；明确拒绝不得伪装成成功。
 - **错误信息尽量可操作且不预设后端**：硬件断点既可走内核驱动，也可走用户态 `perf_event_open`。失败信息应保留结构化错误码，并提示 root、`perf_event_paranoid`、地址对齐、槽位耗尽等中性排查方向，不能一律要求切换内核模式。
 - 断点命中读取 `read_bp_info` 返回 `{total_hits, returned, dropped, hits}`：`total_hits`=设备累计命中数（可大于单次返回上限），`returned`=本次返回记录数，`dropped`=与同一目标、同一地址上次成功轮询相比新增但未返回的条数。设备最多保留最近 100000 条待取记录。
+- Kernel 断点槽位查询 `query_hwbp_slots` 通过 `CMD_KERNEL_QUERYHWBPTHREADS` 枚举当前目标 `/proc/<pid>/task` 下的 TID，并逐线程调用 `hwbp_query_task`。响应保留每个线程的计数、槽位条目和 errno；查询期间退出的线程只标记失败，不影响其它线程。服务边界在非 Kernel 模式明确返回 `permission_denied`。
 
 ---
 
@@ -86,6 +87,7 @@ MCP ▶ IPC ┘         │ 校验/目标快照/复合事务      │
 - **按地址管理**：`set/remove/suspend/resume/read_bp_info` 均以断点地址为键；引擎 `mHwBpList` 为 `地址 → [句柄]`。
 - 现实约束：同一地址至多有读写型与执行型两类、通常只下一个——故**未引入按句柄管理**（保持地址键简单够用）。
 - 设备端支持内核驱动与用户态 `perf_event_open` 两种实现；两者均要求 root，实际可用性还受内核配置、`perf_event_paranoid` 和硬件槽位限制。
+- GUI 在初始化 Kernel 驱动后同步“断点槽抢占”开关。该策略仅对 Kernel 后端生效：per-TID 普通下断失败后使用 `NI_HWBP_F_FORCE_RECLAIM` 重试，并对初始线程与后续新线程记录重试结果。
 - 前端按当前连接跟踪已设置的断点地址：切换同一连接内的目标进程时先清理旧目标断点；断开、重连或连接失败时只重置本地跟踪，绝不向新连接发送旧地址的删除命令。
 - 断点命中轮询使用独立 `PORT_DEBUG` 事务，避免高命中读取阻塞主命令通道。
 
@@ -106,7 +108,7 @@ MCP ▶ IPC ┘         │ 校验/目标快照/复合事务      │
 
 ## 5. 版本
 
-- 应用版本 / 协议版本统一 **MiniMem 1.0.0 / 协议 1.0.0**：后端运行时版本串 `"MiniMem 1.0.0"` + 协议主版本字节 1；前端 `PROJECT_VERSION` / `PROTOCOL_VERSION`；MCP `amem_mcp.__version__`（`pyproject.toml` 动态读取，单一真相源）。
+- 应用版本 / 协议版本统一 **MiniMem 1.0.0 / 协议 1.0.0**：后端运行时版本串 `"MiniMem 1.0.0"` + 协议主版本字节 1；前端 `PROJECT_VERSION` / `PROTOCOL_VERSION`；MCP `minimem_mcp.__version__`（`pyproject.toml` 动态读取，单一真相源）。
 - `CMD_GETVERSION` 返回的版本字节即协议主版本，前端 `VersionWindow` 直接与 `PROTOCOL_VERSION_MAJOR` 比对。
 
 ---
@@ -125,5 +127,5 @@ MCP ▶ IPC ┘         │ 校验/目标快照/复合事务      │
 2. 协议契约：opcode 在 `ceserver.h` 与前端 `client.hpp` 必须一致（0 基连续）；变长数据带显式长度前缀，避免靠固定大小约定。
 3. 客户端：`socket/*Commands.cpp` 实现 + `client_singleton.h` 声明；遵守 §2/§3 契约（连续前缀、状态字段而非哨兵、可操作错误）。
 4. 服务：在 `IMemBackend`/`IMemService` 增加类型化操作，并在 `SystemMemService` 适配协议函数。
-5. 暴露：按需在 GUI / Lua / `IpcServer::RegisterBuiltinMethods()`(→`mcp/amem_mcp/tools/`) 注入服务，禁止直接包含 `client_singleton.h`。
+5. 暴露：按需在 GUI / Lua / `IpcServer::RegisterBuiltinMethods()`(→`mcp/minimem_mcp/tools/`) 注入服务，禁止直接包含 `client_singleton.h`。
 6. 单次收发使用 `SocketCommand::execute*`；依赖多个命令共享远端状态时必须额外持 `TransactionLease`。

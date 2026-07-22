@@ -20,7 +20,7 @@ MiniMem **需要同步 AMem 的业务边界与正确性约束，但不应同步�
 | 符号 | 完整表与单页读取均在单个事务中完成；单页接口不再先加载全部符号 | `MemService::loadSymbolTable/listSymbols` |
 | Lua | 每次顶层执行绑定一个目标上下文；仅 `process.attach()` 可推进脚本目标 | `LuaOperationBinding`、`LuaAPI::GetOperationContext` |
 | IPC | 仅 loopback、JSON POST、无 CORS；拒绝非空 Origin、重复/折叠头和 Transfer-Encoding；有界工作队列与请求预算 | `IpcHttpRequest.*`、`IpcServer.cpp` |
-| 敏感信息 | 卡密无默认值、不显示、不持久化、不写 GUI/engine 日志；旧配置自动清除 | `ServerConnectWindow.cpp`、`ConfigSecurityTests.cpp` |
+| GUI 驱动配置 | 卡密由 GUI 在本地 `config.ini` 保存并以密码框加载，不写 GUI/engine 日志；MCP 不暴露驱动初始化 | `ServerConnectWindow.cpp`、`ConfigSecurityTests.cpp` |
 
 ## 明确不同步的 AMem 内容
 

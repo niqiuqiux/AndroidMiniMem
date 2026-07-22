@@ -63,6 +63,8 @@ public:
     virtual Result<BreakpointHitBatch> breakpointHits(
         const OperationContext& context,
         const BreakpointHitBatchRequest& request) = 0;
+    virtual Result<BreakpointSlotsSnapshot> breakpointSlots(
+        const OperationContext& context, uint32_t capacity = kMaxBreakpointQueryEntries) = 0;
     virtual Result<SymbolTable> loadSymbolTable(
         const OperationContext& context,
         const SymbolTableRequest& request) = 0;

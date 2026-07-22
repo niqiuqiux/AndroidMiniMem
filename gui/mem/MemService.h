@@ -68,6 +68,9 @@ public:
     Result<BreakpointHitBatch> breakpointHits(
         const OperationContext& context,
         const BreakpointHitBatchRequest& request) override;
+    Result<BreakpointSlotsSnapshot> breakpointSlots(
+        const OperationContext& context,
+        uint32_t capacity = kMaxBreakpointQueryEntries) override;
     Result<SymbolTable> loadSymbolTable(
         const OperationContext& context,
         const SymbolTableRequest& request) override;
