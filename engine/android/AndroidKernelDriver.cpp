@@ -280,18 +280,20 @@ uint64_t AndroidKernelDriver::GetSoBaseAddress(int pid, const std::string& soNam
     return d->get_so_base_address(pid, soName);
 }
 
-uint64_t AndroidKernelDriver::AddHardwareBreakpoint(int tid,
-                                                    uint64_t address,
-                                                    unsigned int len,
-                                                    unsigned int type) {
+HardwareBreakpointInstallResult AndroidKernelDriver::AddHardwareBreakpoint(
+    int tid, uint64_t address, unsigned int len, unsigned int type,
+    bool forceReclaim) {
+    HardwareBreakpointInstallResult result;
     if (tid <= 0 || address == 0) {
-        return 0;
+        result.errorCode = EINVAL;
+        return result;
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
     NiDriver* d = driverLocked();
     if (!d) {
-        return 0;
+        result.errorCode = ENODEV;
+        return result;
     }
 
     ni_hwbp_install req{};
@@ -300,16 +302,70 @@ uint64_t AndroidKernelDriver::AddHardwareBreakpoint(int tid,
     req.len = type == NI_HW_BREAKPOINT_X ? NI_HW_BREAKPOINT_LEN_4 : len;
     req.type = type;
     req.flags = NI_HWBP_F_AUTO_REARM;
+    if (forceReclaim) {
+        req.flags |= NI_HWBP_F_FORCE_RECLAIM;
+    }
 
-    if (d->hwbp_install(req) != 0 || req.handle == 0) {
-        return 0;
+    errno = 0;
+    result.interfaceResult = d->hwbp_install(req);
+    result.reclaimedSlots = req.reclaimed_slots;
+    if (result.interfaceResult != 0) {
+        result.errorCode = errno != 0 ? errno : EIO;
+        return result;
+    }
+    if (req.handle == 0) {
+        result.interfaceResult = -1;
+        result.errorCode = EPROTO;
+        return result;
     }
 
     {
         std::lock_guard<std::mutex> hlock(hwbpMutex_);
         hwbpHitTotals_[req.handle] = 0;
     }
-    return req.handle;
+    result.handle = req.handle;
+    return result;
+}
+
+bool AndroidKernelDriver::QueryHardwareBreakpointTask(
+    int tid, uint32_t capacity, HardwareBreakpointTaskQueryResult& out) {
+    out = HardwareBreakpointTaskQueryResult{};
+    out.tid = tid;
+    out.summary.tid = tid;
+    if (tid <= 0 || capacity == 0 || capacity > NI_HWBP_MAX_QUERY_ENTRIES) {
+        out.errorCode = EINVAL;
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    NiDriver* d = driverLocked();
+    if (!d) {
+        out.errorCode = ENODEV;
+        return false;
+    }
+
+    errno = 0;
+    const auto snapshot = d->hwbp_query_task(tid, capacity);
+    if (!snapshot) {
+        out.errorCode = errno != 0 ? errno : EIO;
+        return false;
+    }
+
+    out.success = true;
+    out.errorCode = 0;
+    out.summary = snapshot->summary;
+    out.entries = snapshot->entries;
+    out.summary.entries = 0;
+    if (out.summary.tid != tid ||
+        out.summary.count != out.entries.size() ||
+        out.summary.count > capacity) {
+        out.success = false;
+        out.errorCode = EPROTO;
+        out.entries.clear();
+        out.summary.count = 0;
+        return false;
+    }
+    return true;
 }
 
 bool AndroidKernelDriver::RemoveHardwareBreakpoint(uint64_t handle) {

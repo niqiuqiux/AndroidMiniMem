@@ -13,6 +13,21 @@
 #include "AndroidDriverTypes.h"
 #include "NiDriver.h"
 
+struct HardwareBreakpointInstallResult {
+    uint64_t handle = 0;
+    int interfaceResult = -1;
+    int errorCode = 0;
+    uint32_t reclaimedSlots = 0;
+};
+
+struct HardwareBreakpointTaskQueryResult {
+    int tid = 0;
+    bool success = false;
+    int errorCode = 0;
+    ni_hwbp_task_query summary{};
+    std::vector<ni_hwbp_task_entry> entries;
+};
+
 class AndroidKernelDriver {
 public:
     AndroidKernelDriver() = default;
@@ -40,7 +55,11 @@ public:
     bool GetProcessComm(int pid, char* out, size_t outSize);
     uint64_t GetSoBaseAddress(int pid, const std::string& soName);
 
-    uint64_t AddHardwareBreakpoint(int tid, uint64_t address, unsigned int len, unsigned int type);
+    HardwareBreakpointInstallResult AddHardwareBreakpoint(
+        int tid, uint64_t address, unsigned int len, unsigned int type,
+        bool forceReclaim = false);
+    bool QueryHardwareBreakpointTask(int tid, uint32_t capacity,
+                                     HardwareBreakpointTaskQueryResult& out);
     bool RemoveHardwareBreakpoint(uint64_t handle);
     bool DisableHardwareBreakpoint(uint64_t handle);
     bool EnableHardwareBreakpoint(uint64_t handle);

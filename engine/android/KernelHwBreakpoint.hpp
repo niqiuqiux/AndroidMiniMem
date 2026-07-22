@@ -24,6 +24,7 @@
 #include <thread>
 #include <mutex>
 #include <map>
+#include <set>
 #include <vector>
 #include <algorithm>
 
@@ -42,7 +43,8 @@ public:
     }
 
     // 新增进程级内核硬件断点。成功返回带 tag 的逻辑 handle，失败返回 0。
-    uint64_t AddProcessHwBp(int pid, uint64_t addr, unsigned int len, unsigned int type) {
+    uint64_t AddProcessHwBp(int pid, uint64_t addr, unsigned int len,
+                            unsigned int type, bool forceReclaim) {
         if (pid <= 0 || addr == 0) {
             return 0;
         }
@@ -63,11 +65,17 @@ public:
         e.bp_len = len;
         e.bp_type = type;
         e.enabled = true;
+        e.force_reclaim = forceReclaim;
 
         for (int tid : tids) {
-            uint64_t dh = KernelDriver().AddHardwareBreakpoint(tid, addr, len, type);
+            HardwareBreakpointInstallResult install =
+                InstallForTid(pid, tid, addr, len, type, forceReclaim,
+                              "initial", 0, true);
+            uint64_t dh = install.handle;
             if (dh != 0) {
                 e.subs[tid] = dh;
+            } else {
+                e.loggedInstallFailures.insert(tid);
             }
         }
         if (e.subs.empty()) {
@@ -76,12 +84,17 @@ public:
             return 0;
         }
 
+        const size_t installedCount = e.subs.size();
+        const size_t failedCount = tids.size() - installedCount;
         uint64_t handle = KERNEL_BP_HANDLE_TAG | (uint64_t)(++mSeq);
         mEntries.emplace(handle, std::move(e));
         EnsureWorkerLocked();
         Wake();
-        LOGDF("[kbp] 新增断点 pid=%d addr=0x%llx type=%u len=%u 线程数=%zu handle=0x%llx",
-              pid, (unsigned long long)addr, type, len, tids.size(),
+        LOGDF("[kbp] 新增断点 pid=%d addr=0x%llx type=%u len=%u "
+              "force_reclaim=%d 扫描线程数=%zu 成功=%zu 失败=%zu handle=0x%llx",
+              pid, (unsigned long long)addr, type, len,
+              forceReclaim ? 1 : 0, tids.size(),
+              installedCount, failedCount,
               (unsigned long long)handle);
         return handle;
     }
@@ -169,7 +182,9 @@ private:
         unsigned int bp_len = 0;
         unsigned int bp_type = 0;
         bool enabled = true;
+        bool force_reclaim = false;
         std::map<int, uint64_t> subs;   // tid -> 驱动 handle
+        std::set<int> loggedInstallFailures; // 避免 rescan 对同一存活 TID 重复刷失败日志
     };
 
     std::mutex mMutex;                  // 保护 mEntries
@@ -199,6 +214,67 @@ private:
     }
     KernelHwBreakpoint(const KernelHwBreakpoint&) = delete;
     KernelHwBreakpoint& operator=(const KernelHwBreakpoint&) = delete;
+
+    static HardwareBreakpointInstallResult InstallForTid(
+        int pid, int tid, uint64_t addr, unsigned int len, unsigned int type,
+        bool forceReclaim, const char* phase, uint64_t logicalHandle,
+        bool logFailure) {
+        HardwareBreakpointInstallResult install =
+            KernelDriver().AddHardwareBreakpoint(tid, addr, len, type, false);
+        if (install.handle != 0) {
+            LOGDF("[kbp] 下断成功 phase=%s pid=%d tid=%d addr=0x%llx "
+                  "type=%u len=%u interface_result=%d force_reclaim=0 "
+                  "logical_handle=0x%llx driver_handle=0x%llx",
+                  phase, pid, tid, (unsigned long long)addr, type, len,
+                  install.interfaceResult, (unsigned long long)logicalHandle,
+                  (unsigned long long)install.handle);
+            return install;
+        }
+
+        if (!forceReclaim) {
+            if (logFailure) {
+                LOGEF("[kbp] 下断失败 phase=%s pid=%d tid=%d addr=0x%llx "
+                      "type=%u len=%u interface_result=%d error=%d(%s) "
+                      "force_reclaim=0 logical_handle=0x%llx",
+                      phase, pid, tid, (unsigned long long)addr, type, len,
+                      install.interfaceResult, install.errorCode,
+                      strerror(install.errorCode),
+                      (unsigned long long)logicalHandle);
+            }
+            return install;
+        }
+
+        if (logFailure) {
+            LOGEF("[kbp] 普通下断失败，启动抢占重试 phase=%s pid=%d tid=%d "
+                  "addr=0x%llx type=%u len=%u interface_result=%d error=%d(%s) "
+                  "logical_handle=0x%llx",
+                  phase, pid, tid, (unsigned long long)addr, type, len,
+                  install.interfaceResult, install.errorCode,
+                  strerror(install.errorCode),
+                  (unsigned long long)logicalHandle);
+        }
+
+        HardwareBreakpointInstallResult reclaimed =
+            KernelDriver().AddHardwareBreakpoint(tid, addr, len, type, true);
+        if (reclaimed.handle != 0) {
+            LOGDF("[kbp] 抢占重试成功 phase=%s pid=%d tid=%d addr=0x%llx "
+                  "type=%u len=%u interface_result=%d reclaimed_slots=%u "
+                  "logical_handle=0x%llx driver_handle=0x%llx",
+                  phase, pid, tid, (unsigned long long)addr, type, len,
+                  reclaimed.interfaceResult, reclaimed.reclaimedSlots,
+                  (unsigned long long)logicalHandle,
+                  (unsigned long long)reclaimed.handle);
+        } else if (logFailure) {
+            LOGEF("[kbp] 抢占重试失败 phase=%s pid=%d tid=%d addr=0x%llx "
+                  "type=%u len=%u interface_result=%d error=%d(%s) "
+                  "reclaimed_slots=%u logical_handle=0x%llx",
+                  phase, pid, tid, (unsigned long long)addr, type, len,
+                  reclaimed.interfaceResult, reclaimed.errorCode,
+                  strerror(reclaimed.errorCode), reclaimed.reclaimedSlots,
+                  (unsigned long long)logicalHandle);
+        }
+        return reclaimed;
+    }
 
     // 读取 /proc/<pid>/task 下所有 tid（纯数字目录名）
     static std::vector<int> ScanTids(int pid) {
@@ -238,15 +314,23 @@ private:
             // 补下断新线程
             for (int tid : tids) {
                 if (e.subs.find(tid) == e.subs.end()) {
-                    uint64_t dh = KernelDriver().AddHardwareBreakpoint(tid, e.bp_addr, e.bp_len, e.bp_type);
+                    const bool logFailure =
+                        e.loggedInstallFailures.find(tid) ==
+                        e.loggedInstallFailures.end();
+                    HardwareBreakpointInstallResult install =
+                        InstallForTid(e.pid, tid, e.bp_addr, e.bp_len,
+                                      e.bp_type, e.force_reclaim, "follow",
+                                      kv.first, logFailure);
+                    uint64_t dh = install.handle;
                     if (dh != 0) {
                         // 与逻辑断点当前启停状态保持一致
                         if (!e.enabled) {
                             KernelDriver().DisableHardwareBreakpoint(dh);
                         }
                         e.subs[tid] = dh;
-                        LOGDF("[kbp] 跟随新线程 tid=%d handle=0x%llx", tid,
-                              (unsigned long long)kv.first);
+                        e.loggedInstallFailures.erase(tid);
+                    } else {
+                        e.loggedInstallFailures.insert(tid);
                     }
                 }
             }
@@ -257,6 +341,14 @@ private:
                     sit = e.subs.erase(sit);
                 } else {
                     ++sit;
+                }
+            }
+            for (auto fit = e.loggedInstallFailures.begin();
+                 fit != e.loggedInstallFailures.end(); ) {
+                if (std::find(tids.begin(), tids.end(), *fit) == tids.end()) {
+                    fit = e.loggedInstallFailures.erase(fit);
+                } else {
+                    ++fit;
                 }
             }
         }

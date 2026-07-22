@@ -381,6 +381,56 @@ int NiDriver::hwbp_set_regs(const ni_hwbp_regs_io &regs_io)
 				    0, 0, 0, &copy, sizeof(copy)));
 }
 
+std::optional<ni_hwbp_task_snapshot>
+NiDriver::hwbp_query_task(int tid, uint32_t capacity)
+{
+	if (tid <= 0 || capacity > NI_HWBP_MAX_QUERY_ENTRIES) {
+		errno = EINVAL;
+		return std::nullopt;
+	}
+
+	ni_hwbp_task_snapshot snapshot{};
+	snapshot.entries.resize(capacity);
+	snapshot.summary.tid = tid;
+	snapshot.summary.entries = capacity
+		? reinterpret_cast<uint64_t>(snapshot.entries.data()) : 0;
+	snapshot.summary.capacity = capacity;
+
+	if (cmd(NI_CMD_HWBP_QUERY_TASK, 0, 0, 0, &snapshot.summary,
+		sizeof(snapshot.summary)) < 0)
+		return std::nullopt;
+
+	if (snapshot.summary.count > capacity ||
+		snapshot.summary.total_count < snapshot.summary.count) {
+		errno = EPROTO;
+		return std::nullopt;
+	}
+	snapshot.entries.resize(snapshot.summary.count);
+	snapshot.summary.entries = 0;
+	return snapshot;
+}
+
+int NiDriver::hwbp_cleanup_task(int pid, uint32_t flags,
+				uint32_t *cleaned_count)
+{
+	ni_hwbp_task_cleanup cleanup{};
+
+	if (pid <= 0 || flags & ~NI_HWBP_CLEANUP_F_THREAD) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	cleanup.pid = pid;
+	cleanup.flags = flags;
+	if (cmd(NI_CMD_HWBP_CLEANUP_TASK, 0, 0, 0,
+		&cleanup, sizeof(cleanup)) < 0)
+		return -1;
+
+	if (cleaned_count)
+		*cleaned_count = cleanup.cleaned_count;
+	return 0;
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  HWBP — helpers
  * ══════════════════════════════════════════════════════════════════ */

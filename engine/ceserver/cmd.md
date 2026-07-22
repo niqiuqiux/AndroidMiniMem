@@ -36,6 +36,8 @@
 | CMD_SYMBOL_GETLIST | 19 | 分页获取符号列表 | 参数: `CeGetSymbolListInput`；返回: `CeGetSymbolListOutput` + N×(`CeSymbolEntry`+名称) |
 | CMD_SYMBOL_FIND | 20 | 按名称查找 ELF 符号 | 参数: `CeFindSymbolInput` + 名称；返回: `CeFindSymbolOutput`(result, address) |
 | CMD_GETSOBASE | 21 | 按 so 名称获取模块基址 | 参数: `CeGetSoBaseInput` + 名称；返回: `CeGetSoBaseOutput`(result, base) |
+| CMD_SETKERNELHWBPRECLAIM | 22 | 设置 Kernel 断点槽抢占策略 | 参数: uint8 (0=关闭 / 非0=开启)；返回: int (1=已应用 / 0=当前非 Kernel 模式) |
+| CMD_KERNEL_QUERYHWBPTHREADS | 23 | 查询当前进程每个线程的硬件断点槽位 | 参数: int handle + u32 每线程 capacity(1~64)；返回: int 成功标志 + u32 线程数，随后每线程固定摘要及 N×槽位条目；单线程失败保留 errno，不影响其它线程 |
 
 > 断点类型 `type`：1=读 / 2=写 / 3=读写 / 4=执行（执行断点长度固定 4）。
 
@@ -52,17 +54,18 @@
 
 `CMD_INITRWDRIVER` 是内核切换的入口：服务端尝试通过 newkernelmem 的 anon_fd 通道连接已加载的 `NI` 驱动，并通过 `NI_IOCTL_GET_PROTOCOL_INFO` 校验协议；连接失败时用 `finit_module` 加载 `NI.ko`（优先当前目录，其次 `/data/local/tmp/NI.ko`）。成功后把全局内存读写实现 `g_memIO` 从默认的 `AndroidMemorySys`（syscall 模式）热替换为 `AndroidMemKernel`（内核模式）。`CMD_GETMEMTYPE` 查询当前所处模式。
 
-> **硬件断点支持两种后端，对协议透明**：内核模式（已 `CMD_INITRWDRIVER` 切换）经内核驱动下发；非内核模式自动回退到**用户态 `perf_event_open`** 引擎（`android/PerfHwBreakpoint.hpp`）。两种后端的命令字 / 参数 / 返回完全一致，前端无需区分；按断点 handle 归属自动分发。
+> **硬件断点支持两种后端，对断点命令透明**：内核模式（已 `CMD_INITRWDRIVER` 切换）经内核驱动下发；非内核模式自动回退到**用户态 `perf_event_open`** 引擎（`android/PerfHwBreakpoint.hpp`）。两种后端的设置 / 删除 / 读取命令字、参数和返回一致，按断点 handle 归属自动分发。`CMD_SETKERNELHWBPRECLAIM` 是 Kernel 专用策略：开启后，per-TID 普通安装失败会使用 `NI_HWBP_F_FORCE_RECLAIM` 重试；Perf 模式不使用该策略。
 
 ## 5. 典型流程
 
 1. `CMD_GETVERSION` → 校验版本
-2. `CMD_GETMEMTYPE` / `CMD_INITRWDRIVER` → 查询 / 切换读写模式
+2. `CMD_GETMEMTYPE` / `CMD_INITRWDRIVER` → 查询 / 切换读写模式；Kernel 初始化成功后可发送 `CMD_SETKERNELHWBPRECLAIM`
 3. `CMD_GETPROCESSLIST` → 选进程 → `CMD_OPENPROCESS` 取句柄
 4. `CMD_GETSOBASE` 或 `CMD_GETMODULELIST` → 取模块基址
 5. `CMD_READPROCESSMEMORY` / `CMD_WRITEPROCESSMEMORY` / `CMD_READBRATCHMEMORY` → 读写内存
 6. `CMD_KERNEL_SETBREAKPOINT` → 下断点 → `CMD_KERNEL_READHWBPINFO` 轮询命中
-7. `CMD_SYMBOL_INIT` → `CMD_SYMBOL_FIND` / `CMD_SYMBOL_GETLIST` → 解析 ELF 符号
+7. `CMD_KERNEL_QUERYHWBPTHREADS` → Kernel 模式下查询当前进程各 TID 的断点槽位和占用状态
+8. `CMD_SYMBOL_INIT` → `CMD_SYMBOL_FIND` / `CMD_SYMBOL_GETLIST` → 解析 ELF 符号
 
 ## 6. 错误处理
 

@@ -57,6 +57,7 @@ std::unique_ptr<AndroidElfScanner> g_sym = std::make_unique<AndroidElfScanner>()
 
 // 全局互斥锁：保护 g_memIO 等全局单例的替换和并发访问
 static std::shared_mutex g_globalMutex;
+static std::atomic<bool> g_kernelBreakpointForceReclaim{false};
 
 
 //static SingleCodeClient client;
@@ -145,6 +146,7 @@ static bool ExtractEndTimestampFromKernelLog(std::string &out_end_ts, std::strin
 BOOL CApi::InitReadWriteDriver(const char *procNodeAuthKey,
                                std::string &out_result) {
   out_result = "加载模块失败";
+  g_kernelBreakpointForceReclaim.store(false, std::memory_order_release);
 
   // 若内核驱动连接仍然有效，说明已处于内核模式，直接复用，不重建 AndroidMemKernel。
   // 注意：不能用 g_memIO->type 判断（该字段可能被前端改写），驱动连接状态（m_nFd）
@@ -280,6 +282,21 @@ BOOL CApi::InitReadWriteDriver(const char *procNodeAuthKey,
 unsigned char CApi::GetRWDriverType() {
 	std::shared_lock<std::shared_mutex> rlock(g_globalMutex);
 	return g_memIO->type;
+}
+
+BOOL CApi::SetKernelBreakpointForceReclaim(BOOL enabled) {
+	std::shared_lock<std::shared_mutex> rlock(g_globalMutex);
+	const bool kernelReady =
+		g_memIO->type == MemType_Kernel && KernelDriver().IsConnected();
+	if (!kernelReady) {
+		g_kernelBreakpointForceReclaim.store(false, std::memory_order_release);
+		LOGEF("SetKernelBreakpointForceReclaim: 拒绝设置，当前非 Kernel 模式");
+		return FALSE;
+	}
+	g_kernelBreakpointForceReclaim.store(enabled != FALSE,
+	                                      std::memory_order_release);
+	LOGDF("SetKernelBreakpointForceReclaim: enabled=%d", enabled ? 1 : 0);
+	return TRUE;
 }
 
 
@@ -859,9 +876,14 @@ BOOL GetProcessTask(int pid, std::vector<int> & vOutput) {
 int CApi::SetBreakpoint(HANDLE hProcess, uint64_t address, int bpType, int bpSize){
 	// 选择断点后端：内核模式走内核驱动，否则回退到用户态 perf 引擎
 	bool useKernel;
+	bool forceReclaim = false;
 	{
 		std::shared_lock<std::shared_mutex> rlock(g_globalMutex);
 		useKernel = KernelDriver().IsConnected() && g_memIO->type == MemType_Kernel;
+		if (useKernel) {
+			forceReclaim = g_kernelBreakpointForceReclaim.load(
+				std::memory_order_acquire);
+		}
 	}
 
 	if (CPortHelper::GetHandleType(hProcess) != htProcesHandle) {
@@ -888,7 +910,8 @@ int CApi::SetBreakpoint(HANDLE hProcess, uint64_t address, int bpType, int bpSiz
 	// 两种后端均为"进程级逻辑断点"：引擎内部遍历目标线程并周期 rescan 跟随新建线程，各返回单个逻辑 handle
 	std::vector<uint64_t> HwBpHandle;
 	uint64_t hwBpHandle = useKernel
-		? KernelHwBreakpoint::Get().AddProcessHwBp(processdata->pid, address, len, bpType)
+		? KernelHwBreakpoint::Get().AddProcessHwBp(
+			processdata->pid, address, len, bpType, forceReclaim)
 		: PerfHwBreakpoint::Get().AddProcessHwBp(processdata->pid, address, len, bpType);
 	if (hwBpHandle != 0) {
 		HwBpHandle.push_back(hwBpHandle);
@@ -1110,6 +1133,100 @@ int CApi::ReadHwBpInfo(HANDLE hProcess,uint64_t hwaddr,uint64_t& nHitTotalCount,
 	}
 
 	return static_cast<int>(vOutput.size());
+}
+
+bool CApi::QueryHardwareBreakpointThreads(
+    HANDLE hProcess, uint32_t capacity,
+    std::vector<HwbpTaskThreadInfo>& vOutput) {
+  vOutput.clear();
+  if (capacity == 0 || capacity > NI_HWBP_MAX_QUERY_ENTRIES ||
+      CPortHelper::GetHandleType(hProcess) != htProcesHandle) {
+    return false;
+  }
+
+  uint64_t pl = CPortHelper::GetPointerFromHandle(hProcess);
+  if (pl == 0) {
+    return false;
+  }
+  auto* processdata = reinterpret_cast<CeOpenProcess*>(pl);
+  if (!processdata || processdata->pid <= 0) {
+    return false;
+  }
+
+  {
+    std::shared_lock<std::shared_mutex> rlock(g_globalMutex);
+    if (g_memIO->type != MemType_Kernel || !KernelDriver().IsConnected()) {
+      LOGEF("QueryHardwareBreakpointThreads: 当前非 Kernel 模式");
+      return false;
+    }
+  }
+
+  char taskPath[64];
+  const int pathLength = snprintf(taskPath, sizeof(taskPath),
+                                  "/proc/%d/task", processdata->pid);
+  if (pathLength <= 0 || static_cast<size_t>(pathLength) >= sizeof(taskPath)) {
+    return false;
+  }
+  DIR* dir = opendir(taskPath);
+  if (!dir) {
+    return false;
+  }
+
+  constexpr size_t kMaxThreads = 65536;
+  std::vector<int> tids;
+  while (dirent* entry = readdir(dir)) {
+    if (!entry->d_name[0] || strspn(entry->d_name, "0123456789") !=
+                                  strlen(entry->d_name)) {
+      continue;
+    }
+    char* end = nullptr;
+    const long tid = strtol(entry->d_name, &end, 10);
+    if (!end || *end != '\0' || tid <= 0 || tid > INT32_MAX) {
+      continue;
+    }
+    if (tids.size() >= kMaxThreads) {
+      closedir(dir);
+      return false;
+    }
+    tids.push_back(static_cast<int>(tid));
+  }
+  closedir(dir);
+  std::sort(tids.begin(), tids.end());
+  tids.erase(std::unique(tids.begin(), tids.end()), tids.end());
+  vOutput.reserve(tids.size());
+
+  for (const int tid : tids) {
+    HardwareBreakpointTaskQueryResult raw;
+    const bool ok = KernelDriver().QueryHardwareBreakpointTask(
+        tid, capacity, raw);
+    HwbpTaskThreadInfo result;
+    result.tid = tid;
+    result.success = ok;
+    result.errorCode = raw.errorCode;
+    result.count = raw.summary.count;
+    result.totalCount = raw.summary.total_count;
+    result.brpCount = raw.summary.brp_count;
+    result.wrpCount = raw.summary.wrp_count;
+    result.enabledCount = raw.summary.enabled_count;
+    result.activeCount = raw.summary.active_count;
+    result.perfCount = raw.summary.perf_count;
+    result.ptraceCount = raw.summary.ptrace_count;
+    result.moduleCount = raw.summary.module_count;
+    if (ok) {
+      result.entries.reserve(raw.entries.size());
+      for (const auto& entry : raw.entries) {
+        result.entries.push_back(HwbpTaskEntryInfo{
+            entry.event_id, entry.module_handle, entry.addr, entry.tid,
+            entry.oncpu, entry.type, entry.len, entry.state, entry.source,
+            entry.flags});
+      }
+    } else {
+      result.count = 0;
+      result.entries.clear();
+    }
+    vOutput.push_back(std::move(result));
+  }
+  return true;
 }
 
 

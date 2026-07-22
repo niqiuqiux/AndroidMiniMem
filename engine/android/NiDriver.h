@@ -70,6 +70,8 @@ enum NiHwbpCmd : uint8_t {
 	NI_CMD_HWBP_READ_EVENTS,
 	NI_CMD_HWBP_GET_REGS,
 	NI_CMD_HWBP_SET_REGS,
+	NI_CMD_HWBP_QUERY_TASK,
+	NI_CMD_HWBP_CLEANUP_TASK,
 };
 
 /* ── Map entry (matches kernel, packed) ─────────────────────────── */
@@ -86,6 +88,7 @@ struct ni_map_entry {
 /* ── HWBP constants ─────────────────────────────────────────────── */
 
 constexpr int NI_HWBP_MAX_EVENTS_PER_READ = 256;
+constexpr uint32_t NI_HWBP_MAX_QUERY_ENTRIES = 64;
 
 enum NiHwbpEventType : uint32_t {
 	NI_HWBP_EVENT_HIT = 1,
@@ -110,6 +113,34 @@ enum NiHwbpInstallFlags : uint32_t {
 	NI_HWBP_F_PAUSE_ON_HIT  = 1u << 0,
 	NI_HWBP_F_AUTO_REARM    = 1u << 1,
 	NI_HWBP_F_FORCE_RECLAIM = 1u << 2,
+};
+
+enum NiHwbpSource : uint32_t {
+	NI_HWBP_SOURCE_PERF = 0,
+	NI_HWBP_SOURCE_PTRACE,
+	NI_HWBP_SOURCE_MODULE,
+};
+
+enum NiHwbpPerfState : uint32_t {
+	NI_HWBP_PERF_STATE_UNKNOWN = 0,
+	NI_HWBP_PERF_STATE_DEAD,
+	NI_HWBP_PERF_STATE_EXIT,
+	NI_HWBP_PERF_STATE_ERROR,
+	NI_HWBP_PERF_STATE_OFF,
+	NI_HWBP_PERF_STATE_INACTIVE,
+	NI_HWBP_PERF_STATE_ACTIVE,
+};
+
+enum NiHwbpQueryEntryFlags : uint32_t {
+	NI_HWBP_ENTRY_F_ENABLED = 1u << 0,
+	NI_HWBP_ENTRY_F_ACTIVE = 1u << 1,
+	NI_HWBP_ENTRY_F_PINNED = 1u << 2,
+	NI_HWBP_ENTRY_F_INHERITED = 1u << 3,
+	NI_HWBP_ENTRY_F_SIGTRAP = 1u << 4,
+};
+
+enum NiHwbpCleanupFlags : uint32_t {
+	NI_HWBP_CLEANUP_F_THREAD = 1u << 0,
 };
 
 constexpr uint32_t NI_HW_BREAKPOINT_X   = 4;
@@ -203,6 +234,56 @@ struct ni_hwbp_caps {
 	uint32_t ring_size;
 };
 
+struct ni_hwbp_task_entry {
+	uint64_t event_id;
+	uint64_t module_handle;
+	uint64_t addr;
+	int32_t  tid;
+	int32_t  oncpu;
+	uint32_t type;
+	uint32_t len;
+	uint32_t state;
+	uint32_t source;
+	uint32_t flags;
+	uint32_t reserved;
+};
+
+struct ni_hwbp_task_query {
+	int32_t  tid;
+	uint32_t flags;
+	uint64_t entries;
+	uint32_t capacity;
+	uint32_t count;
+	uint32_t total_count;
+	uint32_t brp_count;
+	uint32_t wrp_count;
+	uint32_t enabled_count;
+	uint32_t active_count;
+	uint32_t perf_count;
+	uint32_t ptrace_count;
+	uint32_t module_count;
+	uint32_t reserved;
+};
+
+struct ni_hwbp_task_cleanup {
+	int32_t  pid;
+	uint32_t flags;
+	uint32_t cleaned_count;
+	uint32_t reserved;
+};
+
+static_assert(sizeof(ni_hwbp_task_entry) == 56,
+	      "ni_hwbp_task_entry ABI size mismatch");
+static_assert(sizeof(ni_hwbp_task_query) == 64,
+	      "ni_hwbp_task_query ABI size mismatch");
+static_assert(sizeof(ni_hwbp_task_cleanup) == 16,
+	      "ni_hwbp_task_cleanup ABI size mismatch");
+
+struct ni_hwbp_task_snapshot {
+	ni_hwbp_task_query summary;
+	std::vector<ni_hwbp_task_entry> entries;
+};
+
 /* ══════════════════════════════════════════════════════════════════
  *  NiDriver — RAII wrapper
  * ══════════════════════════════════════════════════════════════════ */
@@ -281,6 +362,10 @@ public:
 						     uint32_t capacity = NI_HWBP_MAX_EVENTS_PER_READ);
 	int  hwbp_get_regs(ni_hwbp_regs_io &regs_io);
 	int  hwbp_set_regs(const ni_hwbp_regs_io &regs_io);
+	std::optional<ni_hwbp_task_snapshot> hwbp_query_task(
+		int tid, uint32_t capacity = NI_HWBP_MAX_QUERY_ENTRIES);
+	int  hwbp_cleanup_task(int pid, uint32_t flags = 0,
+			       uint32_t *cleaned_count = nullptr);
 
 	/* ── HWBP — helpers ─────────────────────────────────────── */
 

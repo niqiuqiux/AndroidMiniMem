@@ -421,6 +421,18 @@ int DispatchCommand_V2(Ioserver *IOserver, unsigned char command) {
     break;
   }
 
+  case CMD_SETKERNELHWBPRECLAIM: {
+    LOGD("CMD_SETKERNELHWBPRECLAIM");
+    unsigned char enabled = 0;
+    if (!IOserver->Receive(&enabled, sizeof(enabled))) {
+      LOGEF("CMD_SETKERNELHWBPRECLAIM: receive failed");
+      return -1;
+    }
+    int ret = CApi::SetKernelBreakpointForceReclaim(enabled != 0);
+    IOserver->Send(&ret, sizeof(ret));
+    break;
+  }
+
   // 内核断点相关
   case CMD_KERNEL_SETBREAKPOINT: {
     LOGD("CMD_KERNEL_SETBREAKPOINT");
@@ -490,6 +502,65 @@ int DispatchCommand_V2(Ioserver *IOserver, unsigned char command) {
       LOGEF("CMD_KERNEL_READHWBPINFO: failed to send payload");
     }
     LOGDF("CMD_KERNEL_READHWBPINFO end");
+    break;
+  }
+
+  case CMD_KERNEL_QUERYHWBPTHREADS: {
+    LOGD("CMD_KERNEL_QUERYHWBPTHREADS");
+    HANDLE h = 0;
+    uint32_t capacity = 0;
+    if (!IOserver->Receive(&h, sizeof(h)) ||
+        !IOserver->Receive(&capacity, sizeof(capacity))) {
+      LOGEF("CMD_KERNEL_QUERYHWBPTHREADS: receive failed");
+      return -1;
+    }
+    std::vector<HwbpTaskThreadInfo> threads;
+    const bool ok = CApi::QueryHardwareBreakpointThreads(h, capacity, threads);
+    const int result = ok ? 1 : 0;
+    constexpr size_t kMaxThreads = 65536;
+    const uint32_t threadCount = ok && threads.size() <= kMaxThreads
+        ? static_cast<uint32_t>(threads.size()) : 0;
+    if (!IOserver->Send(&result, sizeof(result)) ||
+        !IOserver->Send(&threadCount, sizeof(threadCount))) {
+      return -1;
+    }
+    if (!ok || threadCount == 0) {
+      break;
+    }
+    for (uint32_t i = 0; i < threadCount; ++i) {
+      const auto& thread = threads[i];
+      HwbpTaskThreadHeader header{};
+      header.tid = thread.tid;
+      header.queryResult = thread.success ? 1 : 0;
+      header.errorCode = thread.errorCode;
+      header.count = thread.success
+          ? static_cast<uint32_t>(thread.entries.size()) : 0;
+      header.totalCount = thread.totalCount;
+      header.brpCount = thread.brpCount;
+      header.wrpCount = thread.wrpCount;
+      header.enabledCount = thread.enabledCount;
+      header.activeCount = thread.activeCount;
+      header.perfCount = thread.perfCount;
+      header.ptraceCount = thread.ptraceCount;
+      header.moduleCount = thread.moduleCount;
+      if (!IOserver->Send(&header, sizeof(header))) {
+        return -1;
+      }
+      if (header.count > capacity || header.count > 64 ||
+          header.count != thread.entries.size()) {
+        LOGEF("CMD_KERNEL_QUERYHWBPTHREADS: invalid entry count tid=%d count=%u",
+              thread.tid, header.count);
+        return -1;
+      }
+      for (const auto& source : thread.entries) {
+        HwbpTaskSlot entry{source.eventId, source.moduleHandle, source.address,
+                           source.tid, source.onCpu, source.type, source.length,
+                           source.state, source.source, source.flags, 0};
+        if (!IOserver->Send(&entry, sizeof(entry))) {
+          return -1;
+        }
+      }
+    }
     break;
   }
 

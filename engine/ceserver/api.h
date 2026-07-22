@@ -205,11 +205,41 @@ struct HW_HIT_INFO {
 };
 #pragma pack()
 
+struct HwbpTaskEntryInfo {
+	uint64_t eventId = 0;
+	uint64_t moduleHandle = 0;
+	uint64_t address = 0;
+	int32_t tid = 0;
+	int32_t onCpu = 0;
+	uint32_t type = 0;
+	uint32_t length = 0;
+	uint32_t state = 0;
+	uint32_t source = 0;
+	uint32_t flags = 0;
+};
+
+struct HwbpTaskThreadInfo {
+	int32_t tid = 0;
+	bool success = false;
+	int32_t errorCode = 0;
+	uint32_t count = 0;
+	uint32_t totalCount = 0;
+	uint32_t brpCount = 0;
+	uint32_t wrpCount = 0;
+	uint32_t enabledCount = 0;
+	uint32_t activeCount = 0;
+	uint32_t perfCount = 0;
+	uint32_t ptraceCount = 0;
+	uint32_t moduleCount = 0;
+	std::vector<HwbpTaskEntryInfo> entries;
+};
+
 class CApi {
 public:
 	static BOOL InitReadWriteDriver(const char* procNodeAuthKey,std::string& out_result);
 
 	static unsigned char GetRWDriverType();
+	static BOOL SetKernelBreakpointForceReclaim(BOOL enabled);
 	static HANDLE CreateToolhelp32Snapshot(DWORD dwFlags, DWORD th32ProcessID);
 	static BOOL Process32First(HANDLE hSnapshot, ProcessListEntry & processentry);
 	static BOOL Process32Next(HANDLE hSnapshot, ProcessListEntry &processentry);
@@ -234,6 +264,9 @@ public:
 	static int SuspendBreakpoint(HANDLE hProcess,uint64_t hwaddr);
 	static int ResumeBreakpoint(HANDLE hProcess,uint64_t hwaddr);
 	static int ReadHwBpInfo(HANDLE hProcess,uint64_t hwaddr,uint64_t& nHitTotalCount, std::vector<HW_HIT_INFO>& vOutput);
+	static bool QueryHardwareBreakpointThreads(
+		HANDLE hProcess, uint32_t capacity,
+		std::vector<HwbpTaskThreadInfo>& vOutput);
 
 
 // ELF 符号解析
