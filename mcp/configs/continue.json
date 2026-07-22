@@ -6,11 +6,11 @@
         "transport": {
           "type": "stdio",
           "command": "python",
-          "args": ["-m", "amem_mcp"],
+          "args": ["-m", "minimem_mcp"],
           "env": {
             "PYTHONPATH": "D:/AndroidMEM/AndroidMiniMem/mcp",
-            "AMEM_IPC_HOST": "127.0.0.1",
-            "AMEM_IPC_PORT": "28100"
+            "MINIMEM_IPC_HOST": "127.0.0.1",
+            "MINIMEM_IPC_PORT": "28100"
           }
         }
       }

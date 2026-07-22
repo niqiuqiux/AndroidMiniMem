@@ -35,7 +35,7 @@ def build_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> tuple[Fa
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        prog="amem-mcp",
+        prog="minimem-mcp",
         description=f"MiniMem MCP Server v{__version__} (IPC 代理模式) — 桥接 GUI 的内嵌 IPC Server",
     )
     parser.add_argument(
@@ -43,11 +43,11 @@ def main(argv: list[str] | None = None) -> None:
         version=f"MiniMem MCP {__version__} (二进制协议 v{PROTOCOL_VERSION})",
     )
     parser.add_argument(
-        "--ipc-host", default=os.environ.get("AMEM_IPC_HOST", DEFAULT_HOST),
+        "--ipc-host", default=os.environ.get("MINIMEM_IPC_HOST", DEFAULT_HOST),
         help=f"MiniMem GUI IPC Server 地址 (默认 {DEFAULT_HOST})",
     )
     parser.add_argument(
-        "--ipc-port", type=int, default=int(os.environ.get("AMEM_IPC_PORT", DEFAULT_PORT)),
+        "--ipc-port", type=int, default=int(os.environ.get("MINIMEM_IPC_PORT", DEFAULT_PORT)),
         help=f"MiniMem GUI IPC Server 端口 (默认 {DEFAULT_PORT})",
     )
     parser.add_argument(
@@ -58,8 +58,8 @@ def main(argv: list[str] | None = None) -> None:
 
     mcp, ipc = build_server(args.ipc_host, args.ipc_port)
 
-    # 启动前探测 GUI 是否可达（不阻塞启动）
-    probe = ipc.call("get_status")
+    # GUI 可以晚于 MCP 启动；探测只用于输出诊断信息，不能拖慢 MCP 握手。
+    probe = ipc.call("get_status", retries=0, timeout=1.0)
     if probe.get("success"):
         print(f"[minimem-mcp] v{__version__} 已连接 GUI IPC Server ({ipc.base_url})", file=sys.stderr)
     else:

@@ -94,7 +94,7 @@ class SymbolInfo:
 
 
 # ── TCP 客户端 ───────────────────────────────────────────────────
-class AMemClient:
+class MiniMemClient:
     """与 MiniMem Android 服务端通信的 TCP 客户端"""
 
     def __init__(self):

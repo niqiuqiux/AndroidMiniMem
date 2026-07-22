@@ -18,7 +18,7 @@ AndroidMiniMem 是一个**精简版** Android 远程内存调试工具，由 `an
 
 ## 架构要点
 
-- 设备协议的**单一真相源**是 `gui/socket/client_singleton.h` 的自由函数。新增设备能力 = 在 `socket/*Commands.cpp` 实现 + 在 `client_singleton.h` 声明，再在需要的前端暴露（GUI 面板 / `ipc/IpcServer.cpp` 的 `RegisterBuiltinMethods()` → 对应 `mcp/amem_mcp/tools/`）。
+- 设备协议的**单一真相源**是 `gui/socket/client_singleton.h` 的自由函数。新增设备能力 = 在 `socket/*Commands.cpp` 实现 + 在 `client_singleton.h` 声明，再在需要的前端暴露（GUI 面板 / `ipc/IpcServer.cpp` 的 `RegisterBuiltinMethods()` → 对应 `mcp/minimem_mcp/tools/`）。
 - 后端命令分发在 `engine/ceserver/CEServer.cpp` 的 `DispatchCommand_V2`（socket 接口专用，V1 已随 pipe/stdio 接口移除），具体实现在 `engine/ceserver/api.cpp` 的 `CApi`。
 - **内核切换**：`CApi::InitReadWriteDriver` 尝试连接/加载内核驱动并把全局 `g_memIO` 热替换为 `AndroidMemKernel`（否则默认 `AndroidMemorySys` syscall 模式）；`GetRWDriverType` 返回当前模式。
 - IPC 服务监听 `127.0.0.1:28100`，由 `gui/main.cpp` 启动；MCP（Python）通过 HTTP JSON 转发到它。
@@ -27,7 +27,7 @@ AndroidMiniMem 是一个**精简版** Android 远程内存调试工具，由 `an
 
 - 后端：`cd engine && ./build.sh`（需 `-DANDROID_NDK=`），产物 `bin/socket_server`。
 - 前端：`cd gui && cmake -S . -B build -G Ninja && cmake --build build`，需 `third_party/LuaJIT`，产物 `bin/MiniMemClient.exe`。Capstone/Keystone 可选（Lua 反汇编/汇编）。
-- MCP：`cd mcp && pip install -e .`，命令 `amem-mcp`（包名仍为 `amem_mcp`）。
+- MCP：`cd mcp && pip install -e .`，命令 `minimem-mcp`（包名为 `minimem_mcp`）。
 
 ## 代码规范
 

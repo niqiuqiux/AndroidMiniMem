@@ -1,4 +1,4 @@
 # MiniMem MCP Server 运行时依赖
 # 推荐改用 `pip install -e .`（读取 pyproject.toml）
 
-mcp>=1.0.0
+mcp>=1.0.0,<2.0.0

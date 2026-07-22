@@ -3,7 +3,7 @@
 一个**精简版** Android 远程内存调试工具，由两份既有项目重构而来：
 
 - 后端引擎 `android_mem_engine`（Android ARM64，Cheat Engine 协议服务端）
-- 前端 GUI `AMem`（Windows + Dear ImGui，内置 IPC + Python MCP 桥接）
+- 前端 GUI `MiniMem`（Windows + Dear ImGui，内置 IPC + Python MCP 桥接）
 
 MiniMem 只保留"最基本"的能力，砍掉了数据搜索、指针扫描、冻结列表等重型功能，主要目的是**方便通过 MCP 让 AI 助手驱动内存调试**。
 
@@ -45,7 +45,7 @@ AndroidMiniMem/
 | 进程列表 / 模块列表 | ✅ 保留 | `list_processes` / `list_modules` / `get_module_base` |
 | 内存读 / 写 / 批量读 | ✅ 保留 | `read_memory` / `write_memory` / `read_batch` |
 | 硬件断点（设置/删除/暂停/恢复/读命中） | ✅ 保留 | `set/remove/suspend/resume_breakpoint` / `read_bp_info` |
-| 内核切换 | ✅ 保留 | `init_driver` 加载/连接内核驱动并热切换 `g_memIO`（IO/Syscall/Kernel/SysHook） |
+| 内核切换 | ✅ 保留 | 由 GUI 驱动控制加载/连接内核驱动并热切换 `g_memIO`（IO/Syscall/Kernel/SysHook） |
 | ELF 符号解析 | ✅ 保留 | `symbol_init` / `symbol_list` / `symbol_find` |
 | 指针偏移链解析 | ✅ 保留 | `resolve_offset_chain` |
 | Lua 脚本引擎 | ✅ 保留 | 用于复杂分析（`execute_lua` + GUI 脚本窗口） |
@@ -100,11 +100,11 @@ ctest --test-dir build --output-on-failure
 
 ```bash
 cd mcp
-pip install -e .       # 注册 amem-mcp 命令
-amem-mcp               # 启动 stdio MCP，桥接 GUI 的 IPC 服务
+pip install -e .       # 注册 minimem-mcp 命令
+minimem-mcp            # 启动 stdio MCP，桥接 GUI 的 IPC 服务
 ```
 
-仓库根的 `.mcp.json` 已为 Claude Code 配好（`python -m amem_mcp`，`PYTHONPATH` 指向 `mcp/`）。需先启动 GUI 并连上设备。
+仓库根的 `.mcp.json` 已为 Claude Code 配好（`python -m minimem_mcp`，`PYTHONPATH` 指向 `mcp/`）。需先启动 GUI 并连上设备。
 
 ## MCP 工具一览
 
@@ -113,7 +113,7 @@ amem-mcp               # 启动 stdio MCP，桥接 GUI 的 IPC 服务
 断点：`set_breakpoint` `remove_breakpoint` `suspend_breakpoint` `resume_breakpoint` `read_bp_info`
 符号：`symbol_init` `symbol_list` `symbol_find`
 脚本：`execute_lua`
-状态：`get_status` `get_version` `get_architecture` `init_driver`
+状态：`get_status` `get_version` `get_architecture`
 
 ## 文档
 

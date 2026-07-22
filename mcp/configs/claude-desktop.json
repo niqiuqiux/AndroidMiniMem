@@ -1,14 +1,14 @@
 {
   "_comment": "Claude Desktop — 合并到 %APPDATA%/Claude/claude_desktop_config.json",
-  "_install": "推荐: pip install -e D:/AndroidMEM/AndroidMiniMem/mcp，然后 command 改为 amem-mcp 并删除 args",
+  "_install": "推荐: pip install -e D:/AndroidMEM/AndroidMiniMem/mcp，然后 command 改为 minimem-mcp 并删除 args",
   "mcpServers": {
-    "amem": {
+    "minimem": {
       "command": "python",
-      "args": ["-m", "amem_mcp"],
+      "args": ["-m", "minimem_mcp"],
       "env": {
         "PYTHONPATH": "D:/AndroidMEM/AndroidMiniMem/mcp",
-        "AMEM_IPC_HOST": "127.0.0.1",
-        "AMEM_IPC_PORT": "28100"
+        "MINIMEM_IPC_HOST": "127.0.0.1",
+        "MINIMEM_IPC_PORT": "28100"
       }
     }
   }

@@ -3,16 +3,16 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "amem-mcp"
+name = "minimem-mcp"
 dynamic = ["version"]
 description = "MiniMem MCP Server — 通过 HTTP 桥接 GUI 的 IPC Server，为 AI 助手暴露 Android 内存调试能力（MiniMem 1.0.0）"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
-    { name = "AMem" }
+    { name = "MiniMem" }
 ]
-keywords = ["mcp", "amem", "android", "memory", "debugging", "cheat-engine"]
+keywords = ["mcp", "minimem", "android", "memory", "debugging", "cheat-engine"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -24,20 +24,20 @@ classifiers = [
     "Topic :: Software Development :: Debuggers",
 ]
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<2.0.0",
 ]
 
 [project.scripts]
-amem-mcp = "amem_mcp.app:main"
+minimem-mcp = "minimem_mcp.app:main"
 
 [project.urls]
 Homepage = "https://github.com/"
 Repository = "https://github.com/"
 
 [tool.setuptools.dynamic]
-version = { attr = "amem_mcp.__version__" }
+version = { attr = "minimem_mcp.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["amem_mcp*"]
+include = ["minimem_mcp*"]
 exclude = ["reference*", "configs*"]
