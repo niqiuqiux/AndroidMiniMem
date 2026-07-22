@@ -32,6 +32,34 @@ from ..ipc_client import IpcClient
 _HIT_CACHE: dict[int, dict] = {}
 _SAMPLE_MAX = 50
 
+_QUERY_TYPE_NAMES = {
+    1: "read",
+    2: "write",
+    3: "readwrite",
+    4: "execute",
+}
+_QUERY_SOURCE_NAMES = {
+    0: "perf",
+    1: "ptrace",
+    2: "module",
+}
+_QUERY_STATE_NAMES = {
+    0: "unknown",
+    1: "dead",
+    2: "exit",
+    3: "error",
+    4: "off",
+    5: "inactive",
+    6: "active",
+}
+_QUERY_FLAG_NAMES = (
+    (1 << 0, "enabled"),
+    (1 << 1, "active"),
+    (1 << 2, "pinned"),
+    (1 << 3, "inherited"),
+    (1 << 4, "sigtrap"),
+)
+
 
 def _resolve_bp_type(bp_type: int | str) -> int:
     """接受整数 (1/2/3/4) 或语义字符串，返回统一的整数类型。"""
@@ -121,6 +149,81 @@ def _summarize(address: str, hits: list, total: int) -> str:
 
 
 def register(mcp: FastMCP, ipc: IpcClient) -> None:
+
+    @mcp.tool()
+    def query_hardware_breakpoint_slots() -> str:
+        """查询当前进程所有线程的 Kernel 硬件断点槽位。
+
+        仅适用于 GUI 已初始化的 Kernel 模式。结果保留查询期间退出线程的
+        TID 和 errno，并显示每个已占用槽位的地址、类型、来源、状态及标志。
+        """
+        data = ipc.call_or_raise("query_hwbp_slots")
+        threads = data.get("threads", [])
+        lines = [
+            f"PID {data.get('pid')} Kernel 硬件断点槽位",
+            "  线程 {total} 个 · 成功 {ok} · 失败 {failed} · 返回槽位 {slots}".format(
+                total=data.get("thread_count", len(threads)),
+                ok=data.get("successful_threads", 0),
+                failed=data.get("failed_threads", 0),
+                slots=data.get("returned_slots", 0),
+            ),
+        ]
+        for thread in threads:
+            tid = thread.get("tid")
+            if not thread.get("query_succeeded", False):
+                code = thread.get("error_code", 0)
+                message = thread.get("error", "query failed")
+                lines.append(f"TID {tid}: 查询失败 errno={code} ({message})")
+                continue
+
+            slots = thread.get("slots") or []
+            lines.append(
+                "TID {tid}: {count}/{total} 槽位 · BRP={brp} WRP={wrp} "
+                "enabled={enabled} active={active} · perf={perf} ptrace={ptrace} module={module}".format(
+                    tid=tid,
+                    count=thread.get("count", len(slots)),
+                    total=thread.get("total_count", len(slots)),
+                    brp=thread.get("brp_count", 0),
+                    wrp=thread.get("wrp_count", 0),
+                    enabled=thread.get("enabled_count", 0),
+                    active=thread.get("active_count", 0),
+                    perf=thread.get("perf_count", 0),
+                    ptrace=thread.get("ptrace_count", 0),
+                    module=thread.get("module_count", 0),
+                )
+            )
+            for index, slot in enumerate(slots):
+                type_value = slot.get("type", 0)
+                source_value = slot.get("source", 0)
+                state_value = slot.get("state", 0)
+                flags_value = slot.get("flags", 0)
+                flag_names = [
+                    name for mask, name in _QUERY_FLAG_NAMES
+                    if flags_value & mask
+                ]
+                lines.append(
+                    "  [{index}] addr={address} type={type_name}({type_value}) len={length} "
+                    "source={source_name}({source_value}) state={state_name}({state_value}) "
+                    "flags={flags:#x}[{flag_names}] event={event_id} module={module_handle} "
+                    "tid={slot_tid} on_cpu={on_cpu}".format(
+                        index=index,
+                        address=slot.get("address"),
+                        type_name=_QUERY_TYPE_NAMES.get(type_value, "unknown"),
+                        type_value=type_value,
+                        length=slot.get("length"),
+                        source_name=_QUERY_SOURCE_NAMES.get(source_value, "unknown"),
+                        source_value=source_value,
+                        state_name=_QUERY_STATE_NAMES.get(state_value, "unknown"),
+                        state_value=state_value,
+                        flags=flags_value,
+                        flag_names=",".join(flag_names) or "none",
+                        event_id=slot.get("event_id"),
+                        module_handle=slot.get("module_handle"),
+                        slot_tid=slot.get("tid"),
+                        on_cpu=slot.get("on_cpu"),
+                    )
+                )
+        return "\n".join(lines)
 
     @mcp.tool()
     def set_breakpoint(address: str, bp_type: int = 2, bp_size: int = 4) -> str:

@@ -1,0 +1,4 @@
+interface:
+  display_name: "MiniMem MCP"
+  short_description: "Use MiniMem MCP tools safely and consistently."
+  default_prompt: "Use $minimem-mcp to inspect the current Android target safely through MiniMem."

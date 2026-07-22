@@ -11,14 +11,14 @@ from typing import Any, Optional
 
 # 耗时操作使用更长超时
 _SLOW_METHODS = frozenset({
-    "list_processes", "list_modules", "execute_lua",
+    "list_processes", "list_modules", "execute_lua", "query_hwbp_slots",
 })
 
 _RETRYABLE_METHODS = frozenset({
     "get_status", "get_version", "get_architecture",
     "list_processes", "list_modules", "get_module_base",
     "read_memory", "resolve_offset_chain",
-    "read_bp_info",
+    "read_bp_info", "query_hwbp_slots",
     "symbol_list", "symbol_find",
 })
 

@@ -1,11 +1,11 @@
 # MiniMem MCP Server
 
-MiniMem MCP Server 是一个基于 [Model Context Protocol](https://modelcontextprotocol.io/) 的服务。它对 AI 助手暴露 MCP 工具，对内通过 HTTP JSON 代理到 MiniMem GUI 内嵌的 IPC Server。为兼容既有配置，Python 包与命令仍名为 `amem_mcp` / `amem-mcp`。
+MiniMem MCP Server 是一个基于 [Model Context Protocol](https://modelcontextprotocol.io/) 的服务。它对 AI 助手暴露 MCP 工具，对内通过 HTTP JSON 代理到 MiniMem GUI 内嵌的 IPC Server。Python 包与命令统一命名为 `minimem_mcp` / `minimem-mcp`。
 
 ## 架构
 
 ```
-AI 助手  ←── stdio ──→  amem-mcp (Python)  ←── HTTP JSON ──→  MiniMem GUI (C++ IPC :28100)
+AI 助手  ←── stdio ──→  minimem-mcp (Python)  ←── HTTP JSON ──→  MiniMem GUI (C++ IPC :28100)
                                                                        ↕
                                                                  Android 设备
 ```
@@ -18,16 +18,16 @@ MCP Server 本身不直接与 Android 设备通信，所有操作都委托给 Mi
 
 | 连接 | 协议 / 传输 | 说明 |
 |------|-------------|------|
-| AI 助手 ↔ `amem-mcp` | MCP over `stdio` | IDE/Codex 启动本地 Python 进程，通过标准输入输出交换 MCP 消息 |
-| `amem-mcp` ↔ MiniMem GUI IPC Server | HTTP JSON | 默认业务路径。MCP 工具内部把请求转发到 GUI 的 IPC Server，默认地址 `http://127.0.0.1:28100` |
+| AI 助手 ↔ `minimem-mcp` | MCP over `stdio` | IDE/Codex 启动本地 Python 进程，通过标准输入输出交换 MCP 消息 |
+| `minimem-mcp` ↔ MiniMem GUI IPC Server | HTTP JSON | 默认业务路径。MCP 工具内部把请求转发到 GUI 的 IPC Server，默认地址 `http://127.0.0.1:28100` |
 
-因此 `.mcp.json` / `~/.codex/config.toml` 里配置的是第一层：用 `command` 启动 `amem-mcp`，不是填 HTTP URL。真正访问 MiniMem 的默认路径是第二层 HTTP JSON，地址通过 `AMEM_IPC_HOST` / `AMEM_IPC_PORT` 或 `--ipc-host` / `--ipc-port` 指定。
+因此 `.mcp.json` / `~/.codex/config.toml` 里配置的是第一层：用 `command` 启动 `minimem-mcp`，不是填 HTTP URL。真正访问 MiniMem 的默认路径是第二层 HTTP JSON，地址通过 `MINIMEM_IPC_HOST` / `MINIMEM_IPC_PORT` 或 `--ipc-host` / `--ipc-port` 指定。
 
 当前 Python MCP 入口仅支持 `stdio`：
 
 ```bash
-amem-mcp --transport stdio
-python -m amem_mcp --transport stdio
+minimem-mcp --transport stdio
+python -m minimem_mcp --transport stdio
 ```
 
 ## 环境要求
@@ -46,7 +46,7 @@ cd mcp
 pip install -e .
 ```
 
-安装后会注册 `amem-mcp` 命令，无需再写绝对路径。
+安装后会注册 `minimem-mcp` 命令，无需再写绝对路径。
 
 ### B. 仅安装依赖
 
@@ -55,26 +55,26 @@ cd mcp
 pip install -r requirements.txt
 ```
 
-用 `python -m amem_mcp` 或 `python server.py` 启动。
+用 `python -m minimem_mcp` 或 `python server.py` 启动。
 
 ## 启动 / 命令行
 
 ```bash
-amem-mcp                                       # pip install 后
-python -m amem_mcp                             # 模块方式
-python server.py                               # 兼容入口（任意 cwd）
+minimem-mcp                                       # pip install 后
+python -m minimem_mcp                             # 模块方式
+python server.py                                  # 兼容入口（任意 cwd）
 
-amem-mcp --ipc-host 127.0.0.1 --ipc-port 28100 # 指定 IPC 地址
+minimem-mcp --ipc-host 127.0.0.1 --ipc-port 28100 # 指定 IPC 地址
 ```
 
-也支持环境变量 `AMEM_IPC_HOST` / `AMEM_IPC_PORT`（对 IDE 配置很有用）。
+也支持环境变量 `MINIMEM_IPC_HOST` / `MINIMEM_IPC_PORT`（对 IDE 配置很有用）。
 
 ### 路径与环境变量
 
 如果已经执行 `pip install -e .`，推荐在 IDE 配置中直接使用：
 
 ```json
-{ "command": "amem-mcp" }
+{ "command": "minimem-mcp" }
 ```
 
 如果没有安装包，需要用 `PYTHONPATH` 指向本项目的 `mcp` 目录，然后用模块方式启动：
@@ -82,11 +82,11 @@ amem-mcp --ipc-host 127.0.0.1 --ipc-port 28100 # 指定 IPC 地址
 ```json
 {
   "command": "python",
-  "args": ["-m", "amem_mcp"],
+  "args": ["-m", "minimem_mcp"],
   "env": {
     "PYTHONPATH": "D:/AndroidMEM/AndroidMiniMem/mcp",
-    "AMEM_IPC_HOST": "127.0.0.1",
-    "AMEM_IPC_PORT": "28100"
+    "MINIMEM_IPC_HOST": "127.0.0.1",
+    "MINIMEM_IPC_PORT": "28100"
   }
 }
 ```
@@ -98,7 +98,7 @@ amem-mcp --ipc-host 127.0.0.1 --ipc-port 28100 # 指定 IPC 地址
 | Windows 原生 IDE | `D:/AndroidMEM/AndroidMiniMem/mcp` |
 | WSL / Linux Codex | `/home/qiu/桌面/MEMTool/AndroidMiniMem/mcp` |
 
-`AMEM_IPC_HOST` / `AMEM_IPC_PORT` 指的是 MiniMem GUI IPC Server 地址，不是 MCP Server 的监听地址。
+`MINIMEM_IPC_HOST` / `MINIMEM_IPC_PORT` 指的是 MiniMem GUI IPC Server 地址，不是 MCP Server 的监听地址。
 
 ---
 
@@ -106,9 +106,9 @@ amem-mcp --ipc-host 127.0.0.1 --ipc-port 28100 # 指定 IPC 地址
 
 每个 IDE 需要的配置格式不同。`configs/` 目录下提供了全部样例，复制后按本机路径调整即可用。
 
-> 以下示例假设用的是**可编辑安装**，推荐把 `command: "python", args: ["-m", "amem_mcp"]` 改为 `command: "amem-mcp"` 并删除 `args`、`env.PYTHONPATH`。
+> 以下示例假设用的是**可编辑安装**，推荐把 `command: "python", args: ["-m", "minimem_mcp"]` 改为 `command: "minimem-mcp"` 并删除 `args`、`env.PYTHONPATH`。
 
-> 注意：这些 IDE 配置都是 `stdio` MCP。不要把 `http://127.0.0.1:28100` 写成 MCP URL；它只是 `amem-mcp` 内部访问 GUI IPC 的地址。
+> 注意：这些 IDE 配置都是 `stdio` MCP。不要把 `http://127.0.0.1:28100` 写成 MCP URL；它只是 `minimem-mcp` 内部访问 GUI IPC 的地址。
 
 ### Claude Code
 
@@ -117,11 +117,11 @@ amem-mcp --ipc-host 127.0.0.1 --ipc-port 28100 # 指定 IPC 地址
 ```json
 {
   "mcpServers": {
-    "amem": {
-      "command": "amem-mcp",
+    "minimem": {
+      "command": "minimem-mcp",
       "env": {
-        "AMEM_IPC_HOST": "127.0.0.1",
-        "AMEM_IPC_PORT": "28100"
+        "MINIMEM_IPC_HOST": "127.0.0.1",
+        "MINIMEM_IPC_PORT": "28100"
       }
     }
   }
@@ -133,13 +133,13 @@ amem-mcp --ipc-host 127.0.0.1 --ipc-port 28100 # 指定 IPC 地址
 ```json
 {
   "mcpServers": {
-    "amem": {
+    "minimem": {
       "command": "python",
-      "args": ["-m", "amem_mcp"],
+      "args": ["-m", "minimem_mcp"],
       "env": {
         "PYTHONPATH": "D:/AndroidMEM/AndroidMiniMem/mcp",
-        "AMEM_IPC_HOST": "127.0.0.1",
-        "AMEM_IPC_PORT": "28100"
+        "MINIMEM_IPC_HOST": "127.0.0.1",
+        "MINIMEM_IPC_PORT": "28100"
       }
     }
   }
@@ -155,7 +155,7 @@ amem-mcp --ipc-host 127.0.0.1 --ipc-port 28100 # 指定 IPC 地址
 ```json
 {
   "mcpServers": {
-    "amem": { "command": "amem-mcp" }
+    "minimem": { "command": "minimem-mcp" }
   }
 }
 ```
@@ -167,28 +167,24 @@ amem-mcp --ipc-host 127.0.0.1 --ipc-port 28100 # 指定 IPC 地址
 合并到 `~/.codex/config.toml`（Codex 只支持用户级配置，不支持项目级）：
 
 ```toml
-[mcp_servers.amem]
-command = "amem-mcp"
-
-[mcp_servers.amem.env]
-AMEM_IPC_HOST = "127.0.0.1"
-AMEM_IPC_PORT = "28100"
+[mcp_servers.minimem]
+command = "/home/qiu/桌面/MEMTool/AndroidMiniMem/mcp/.venv/bin/python"
+args = ["-m", "minimem_mcp", "--transport", "stdio", "--ipc-host", "127.0.0.1", "--ipc-port", "28100"]
+startup_timeout_sec = 15
+tool_timeout_sec = 210
+enabled = true
 ```
 
-如果没有安装包：
+推荐先创建项目内隔离环境，避免系统 Python 缺少 `mcp` SDK 或出现版本冲突：
 
-```toml
-[mcp_servers.amem]
-command = "python"
-args = ["-m", "amem_mcp"]
-
-[mcp_servers.amem.env]
-PYTHONPATH = "/home/qiu/桌面/MEMTool/AndroidMiniMem/mcp"
-AMEM_IPC_HOST = "127.0.0.1"
-AMEM_IPC_PORT = "28100"
+```bash
+python3 -m venv mcp/.venv
+mcp/.venv/bin/python -m pip install -e mcp
 ```
 
-注意 Codex 的 key 是 `mcp_servers`（下划线），不是 JSON 系列的 `mcpServers`。Codex 目前读取用户级 `~/.codex/config.toml`，不会自动读取项目根目录的 `.mcp.json`。
+配置中的 `--ipc-host` / `--ipc-port` 是 MiniMem GUI 的 HTTP JSON 地址。`stdio` 只负责 Codex 与 Python 适配层之间的 MCP 握手，不承载实际驱动业务。`tool_timeout_sec` 覆盖 HTTP 客户端对只读操作进行重试时的最坏等待时间。
+
+注意 Codex 的 key 是 `mcp_servers`（下划线），不是 JSON 系列的 `mcpServers`。Codex 目前读取用户级 `~/.codex/config.toml`，不会自动读取项目根目录的 `.mcp.json`。若项目路径不同，需要同步修改 `command` 的绝对路径。
 
 模板：[`configs/codex.toml`](./configs/codex.toml)
 
@@ -199,7 +195,7 @@ AMEM_IPC_PORT = "28100"
 ```json
 {
   "mcpServers": {
-    "amem": { "command": "amem-mcp" }
+    "minimem": { "command": "minimem-mcp" }
   }
 }
 ```
@@ -213,9 +209,9 @@ VS Code 的 MCP 配置 key 是 `servers` 而不是 `mcpServers`。放置于项�
 ```json
 {
   "servers": {
-    "amem": {
+    "minimem": {
       "type": "stdio",
-      "command": "amem-mcp"
+      "command": "minimem-mcp"
     }
   }
 }
@@ -231,7 +227,7 @@ VS Code 的 MCP 配置 key 是 `servers` 而不是 `mcpServers`。放置于项�
 
 ## 通信协议
 
-本节描述默认业务通信路径：`amem-mcp` 内部通过 HTTP POST 向 MiniMem GUI IPC Server 发送 JSON 请求。MCP 客户端本身仍然通过 `stdio` 调用 `amem-mcp`，但所有进程、模块、内存、断点、Lua、符号等工具最终默认都会走这条 HTTP JSON 代理路径。
+本节描述默认业务通信路径：`minimem-mcp` 内部通过 HTTP POST 向 MiniMem GUI IPC Server 发送 JSON 请求。MCP 客户端本身仍然通过 `stdio` 调用 `minimem-mcp`，但所有进程、模块、内存、断点、Lua、符号等工具最终默认都会走这条 HTTP JSON 代理路径。
 
 ```json
 // 请求
@@ -256,7 +252,8 @@ VS Code 的 MCP 配置 key 是 `servers` 而不是 `mcpServers`。放置于项�
 | `get_status()` | 获取 GUI 当前状态（连接状态、PID、进程名） |
 | `get_server_version()` | 获取 Android 服务端版本信息 |
 | `get_architecture()` | 获取目标设备内存架构类型 |
-| `init_driver(card_name)` | 初始化内核读写驱动，需传入授权卡密 |
+
+驱动初始化由 MiniMem GUI 完成，不通过 MCP 暴露卡密或驱动切换入口。
 
 ### 进程与模块
 
@@ -295,6 +292,7 @@ VS Code 的 MCP 配置 key 是 `servers` 而不是 `mcpServers`。放置于项�
 | `set_breakpoint(address, bp_type=2, bp_size=4)` | `bp_type`: 1~4 整数或字符串别名; `bp_size`: 1/2/4/8（执行断点强制 4） | 设置硬件断点 |
 | `remove_breakpoint(address)` | — | 移除断点 |
 | `read_breakpoint_info(address)` | — | 读取断点命中信息（含 ARM64 寄存器状态） |
+| `query_hardware_breakpoint_slots()` | — | Kernel 模式下查询当前进程所有线程的断点槽位、汇总计数和单线程 errno |
 | `suspend_breakpoint(address)` | — | 暂停断点（不删除） |
 | `resume_breakpoint(address)` | — | 恢复已暂停的断点 |
 
@@ -318,7 +316,7 @@ VS Code 的 MCP 配置 key 是 `servers` 而不是 `mcpServers`。放置于项�
 
 | URI | 说明 |
 |-----|------|
-| `amem://status` | 当前 MiniMem GUI 状态（连接、PID、进程名） |
+| `minimem://status` | 当前 MiniMem GUI 状态（连接、PID、进程名） |
 
 ---
 
@@ -343,15 +341,15 @@ VS Code 的 MCP 配置 key 是 `servers` 而不是 `mcpServers`。放置于项�
 
 ```
 mcp/
-├── amem_mcp/                # 主包
+├── minimem_mcp/                # 主包
 │   ├── __init__.py
-│   ├── __main__.py          # python -m amem_mcp 入口
+│   ├── __main__.py          # python -m minimem_mcp 入口
 │   ├── app.py               # FastMCP 装配 + main()
 │   ├── constants.py         # 数据类型 / 硬件断点
 │   ├── helpers.py           # hex_dump / encode_value / 参数校验
 │   ├── ipc_client.py        # HTTP JSON 客户端
 │   └── tools/               # 工具按域拆分
-│       ├── status.py        # 状态、版本、架构、驱动
+│       ├── status.py        # 状态、版本、架构
 │       ├── process.py       # 进程、模块、指针链
 │       ├── memory.py        # 内存读写
 │       ├── breakpoint_.py   # 硬件断点
@@ -366,8 +364,8 @@ mcp/
 │   └── vscode.json
 ├── reference/               # 二进制协议参考实现（MCP 不用）
 │   ├── README.md
-│   └── amem_client.py
-├── pyproject.toml           # pip 安装入口，注册 amem-mcp 命令
+│   └── minimem_client.py
+├── pyproject.toml           # pip 安装入口，注册 minimem-mcp 命令
 ├── requirements.txt
 ├── server.py                # 兼容入口
 └── README.md
@@ -375,4 +373,4 @@ mcp/
 
 ## 开发
 
-添加新工具：在 `amem_mcp/tools/` 下新建或编辑模块，实现 `register(mcp, ipc)` 函数，并在 `tools/__init__.py` 的 `register_all` 里注册。所有扫描/类型常量都在 `amem_mcp/constants.py`，复用已有 helper 可避免重复的编码逻辑。
+添加新工具：在 `minimem_mcp/tools/` 下新建或编辑模块，实现 `register(mcp, ipc)` 函数，并在 `tools/__init__.py` 的 `register_all` 里注册。数据类型和断点常量位于 `minimem_mcp/constants.py`，复用已有 helper 可避免重复的编码逻辑。
