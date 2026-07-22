@@ -50,6 +50,8 @@ All addresses must be non-negative integers or strings accepted by Python base-0
 
 Breakpoint operations use addresses rather than handles. A summary distinguishes likely execute breakpoints from data watchpoints and reports hot LR or PC values. Treat this as evidence to correlate with mappings and symbols, not as a final semantic conclusion.
 
+Track every successfully installed breakpoint address. Once no further hit data is needed, call `remove_breakpoint(address)` before switching targets, starting unrelated work, or ending the workflow. `suspend_breakpoint()` preserves the breakpoint and its hardware-slot usage, so it is only a temporary pause and does not satisfy cleanup. If removal has an ambiguous result, re-check status and report that the breakpoint may remain installed instead of claiming cleanup succeeded.
+
 ## Symbols
 
 | Tool | Behavior and constraints |

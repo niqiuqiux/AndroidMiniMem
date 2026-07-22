@@ -24,7 +24,8 @@ Do not invent process IDs, module names, addresses, values, breakpoint hits, reg
 5. For module-relative work, call `list_modules()` or `get_module_base()` before calculating an address. Prefer `resolve_offset_chain()` for pointer chains.
 6. Prefer small, targeted reads until the process, address, type, and expected effect are clear.
 7. Perform writes, breakpoint changes, or Lua execution only when the user explicitly requested that class of action. Verify effects with a read-back or state query when possible.
-8. Report the selected process and exact addresses alongside results so the user can detect stale-target mistakes.
+8. Track every breakpoint address installed during the workflow. As soon as no further hit data is needed, call `remove_breakpoint()` for each temporary breakpoint before switching targets, starting unrelated work, or finishing the task.
+9. Report the selected process and exact addresses alongside results so the user can detect stale-target mistakes.
 
 `open_process()` changes global GUI target state and may clean up breakpoints belonging to the old target. Treat it as a state-changing operation, not simple discovery.
 
@@ -35,7 +36,7 @@ Do not invent process IDs, module names, addresses, values, breakpoint hits, reg
 - Use `read_value()` for scalars. Use `read_memory()` only when surrounding bytes matter, and keep ranges narrow.
 - Use `execute_lua()` only when direct tools are insufficient or the user requests Lua automation. Keep code short, deterministic, and scoped to the selected target. Summarize generated code before execution.
 - Do not repeatedly retry a mutating operation after timeout, connection loss, or an ambiguous response. Re-check status and current state first because completion may be unknown.
-- Remove temporary breakpoints when the requested investigation is complete, unless the user asked to leave them active.
+- Treat breakpoint cleanup as part of the requested operation. Do not leave a temporary breakpoint installed after its data is no longer needed unless the user explicitly asked to keep it.
 
 MiniMem intentionally has no value scanning, fuzzy scanning, pointer scanning, freeze list, or injection tools. Do not call or imply those capabilities. Use module discovery, pointer-chain resolution, targeted reads, symbols, breakpoints, or scoped Lua as applicable.
 
@@ -63,7 +64,10 @@ MiniMem intentionally has no value scanning, fuzzy scanning, pointer scanning, f
 - Call `read_breakpoint_info(address)` once to pull and aggregate the pending hit batch. This device-side read drains pending records and refreshes the Python snapshot cache when hits exist.
 - Use `read_breakpoint_samples(address, offset, count)` to inspect raw registers from that cached batch. Do not call `read_breakpoint_info()` again merely to paginate samples.
 - Correlate hot PCs or LR values with `list_modules()` and symbol tools before assigning semantic meaning.
-- Suspend or remove a breakpoint when it is no longer needed.
+- Keep a list of every address passed successfully to `set_breakpoint()` so cleanup does not depend on memory or rediscovery.
+- When no more hits or samples are needed from a breakpoint, call `remove_breakpoint(address)` immediately and before continuing to unrelated operations. Remove all temporary breakpoints before changing the selected process or completing the workflow.
+- Use `suspend_breakpoint()` only for a deliberate short pause followed by `resume_breakpoint()`. Suspension is not cleanup and does not release the hardware slot; use `remove_breakpoint()` when observation has ended.
+- If removal fails or completion is ambiguous, call `get_status()`, report the address as potentially still installed, and do not claim cleanup succeeded or blindly repeat the mutation.
 - Use `query_hardware_breakpoint_slots()` to inspect per-thread Kernel hardware-breakpoint slots. It is read-only, requires GUI Kernel mode, and must be interpreted as a point-in-time snapshot; a failed TID query is not evidence that other thread results are invalid.
 
 ### Symbols and Lua
