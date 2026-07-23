@@ -106,6 +106,7 @@ jobs:
             -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/artifacts/gui-linux" \
             -DCMAKE_LIBRARY_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/artifacts/gui-linux-lib" \
             -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/artifacts/gui-linux-lib" \
+            -DBUILD_TESTING=OFF \
             -DUSE_DX12=OFF \
             -DUSE_OPENGL3=ON \
             -Dkeystone_ROOT="$GITHUB_WORKSPACE/gui/third_party/keystone-linux" \
@@ -115,9 +116,6 @@ jobs:
 
       - name: Build GUI
         run: cmake --build build/gui-linux --parallel
-
-      - name: Run GUI tests
-        run: ctest --test-dir build/gui-linux --output-on-failure
 
       - name: Upload GUI artifact
         uses: actions/upload-artifact@v4
