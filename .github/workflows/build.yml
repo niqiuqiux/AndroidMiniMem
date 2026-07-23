@@ -203,3 +203,76 @@ jobs:
           path: artifacts/mcp/*.whl
           if-no-files-found: error
           retention-days: 7
+
+  publish-release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - gui-windows
+      - gui-linux
+      - engine-android
+      - mcp-python
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Windows GUI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: MiniMemClient-${{ github.sha }}
+          path: staging/windows
+
+      - name: Download Linux GUI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: MiniMemClient-linux-${{ github.sha }}
+          path: staging/linux
+
+      - name: Download Android engine artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: minimem-server-${{ github.sha }}
+          path: staging/engine
+
+      - name: Download MCP artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: minimem-mcp-${{ github.sha }}
+          path: staging/mcp
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+
+          test -f staging/windows/MiniMemClient.exe
+          (cd staging/windows && zip -q "$GITHUB_WORKSPACE/release/MiniMemClient-windows-x64.zip" MiniMemClient.exe)
+
+          test -f staging/linux/MiniMemClient
+          test -f staging/linux/libkeystone.so.0
+          chmod +x staging/linux/MiniMemClient
+          tar -C staging/linux -czf release/MiniMemClient-linux-x64.tar.gz \
+            MiniMemClient libkeystone.so.0
+
+          test -f staging/engine/minimem_server
+          chmod +x staging/engine/minimem_server
+          tar -C staging/engine -czf release/minimem_server-android-arm64.tar.gz \
+            minimem_server
+
+          cp staging/mcp/*.whl release/
+          sha256sum release/* | sort > release/SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release/* \
+              --verify-tag \
+              --title "AndroidMiniMem $GITHUB_REF_NAME" \
+              --generate-notes
+          fi
