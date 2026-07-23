@@ -1,0 +1,207 @@
+name: Build AndroidMiniMem
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUILD_TYPE: Release
+  LLVM_VERSION: 21
+  ANDROID_NDK_VERSION: 27.2.12479018
+
+jobs:
+  gui-windows:
+    name: Windows GUI
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup LLVM
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: ${{ env.LLVM_VERSION }}
+          directory: ${{ runner.temp }}/llvm
+
+      - name: Setup Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v4
+
+      - name: Install static native dependencies
+        run: |
+          vcpkg install 'capstone[core,arm,arm64,x86,mips]:x64-windows-static' 'keystone:x64-windows-static'
+        shell: bash
+
+      - name: Configure GUI
+        run: |
+          cmake -S gui -B build/gui -G Ninja \
+            -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCMAKE_C_COMPILER="${{ runner.temp }}/llvm/bin/clang.exe" \
+            -DCMAKE_CXX_COMPILER="${{ runner.temp }}/llvm/bin/clang++.exe" \
+            -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/artifacts/gui" \
+            -DCMAKE_LIBRARY_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/artifacts/gui-lib" \
+            -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/artifacts/gui-lib" \
+            -Dcapstone_ROOT="$VCPKG_INSTALLATION_ROOT/installed/x64-windows-static" \
+            -Dkeystone_ROOT="$VCPKG_INSTALLATION_ROOT/installed/x64-windows-static" \
+            -DMINIMEM_STATIC_RUNTIME=ON \
+            -DMINIMEM_REQUIRE_LUAJIT=ON \
+            -DMINIMEM_REQUIRE_CAPSTONE=ON \
+            -DMINIMEM_REQUIRE_KEYSTONE=ON
+        shell: bash
+
+      - name: Build GUI
+        run: cmake --build build/gui --parallel
+        shell: bash
+
+      - name: Run GUI tests
+        run: ctest --test-dir build/gui --build-config "$BUILD_TYPE" --output-on-failure
+        shell: bash
+
+      - name: Upload GUI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiniMemClient-${{ github.sha }}
+          path: artifacts/gui/MiniMemClient.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  gui-linux:
+    name: Linux GUI
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v4
+
+      - name: Install Linux GUI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcapstone-dev \
+            libgl1-mesa-dev \
+            libglfw3-dev \
+            libluajit2-5.1-dev \
+            pkg-config
+
+      - name: Configure GUI
+        run: |
+          cmake -S gui -B build/gui-linux -G Ninja \
+            -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+            -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/artifacts/gui-linux" \
+            -DCMAKE_LIBRARY_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/artifacts/gui-linux-lib" \
+            -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/artifacts/gui-linux-lib" \
+            -DUSE_DX12=OFF \
+            -DUSE_OPENGL3=ON \
+            -Dkeystone_ROOT="$GITHUB_WORKSPACE/gui/third_party/keystone-linux" \
+            -DMINIMEM_REQUIRE_LUAJIT=ON \
+            -DMINIMEM_REQUIRE_CAPSTONE=ON \
+            -DMINIMEM_REQUIRE_KEYSTONE=ON
+
+      - name: Build GUI
+        run: cmake --build build/gui-linux --parallel
+
+      - name: Run GUI tests
+        run: ctest --test-dir build/gui-linux --output-on-failure
+
+      - name: Upload GUI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiniMemClient-linux-${{ github.sha }}
+          path: |
+            artifacts/gui-linux/MiniMemClient
+            artifacts/gui-linux/libkeystone.so.0
+          if-no-files-found: error
+          retention-days: 7
+
+  engine-android:
+    name: Android ARM64 engine
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v4
+
+      - name: Install Android NDK
+        run: sdkmanager --install "ndk;$ANDROID_NDK_VERSION"
+
+      - name: Configure engine
+        run: |
+          NDK_ROOT="$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION"
+          cmake -S engine -B build/engine -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK_ROOT/build/cmake/android.toolchain.cmake" \
+            -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+            -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/artifacts/engine" \
+            -DCMAKE_LIBRARY_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/artifacts/engine-lib" \
+            -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/artifacts/engine-lib" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-26 \
+            -DBUILD_SOCKET_INTERFACE=ON \
+            -DENABLE_STRIP=ON
+
+      - name: Build engine
+        run: cmake --build build/engine --parallel
+
+      - name: Upload engine artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimem-server-${{ github.sha }}
+          path: artifacts/engine/minimem_server
+          if-no-files-found: error
+          retention-days: 7
+
+  mcp-python:
+    name: Python MCP package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: mcp/pyproject.toml
+
+      - name: Build package
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build mcp --outdir artifacts/mcp
+
+      - name: Smoke test package
+        run: |
+          python -m pip install artifacts/mcp/*.whl
+          python -m compileall -q mcp/minimem_mcp
+          minimem-mcp --version
+          python -c "from minimem_mcp.app import build_server; server, ipc = build_server(); assert server and ipc"
+
+      - name: Upload MCP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimem-mcp-${{ github.sha }}
+          path: artifacts/mcp/*.whl
+          if-no-files-found: error
+          retention-days: 7

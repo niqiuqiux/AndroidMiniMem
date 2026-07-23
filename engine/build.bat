@@ -11,7 +11,6 @@ set BUILD_TYPE=Release
 set CLEAN=0
 set JOBS=%NUMBER_OF_PROCESSORS%
 set NDK_PATH=
-set NO_OBFUSCATION=0
 set NO_STRIP=0
 
 REM 解析命令行参数
@@ -26,7 +25,6 @@ if /I "%~1"=="--clean" (
 )
 if /I "%~1"=="--debug" (
     set BUILD_TYPE=Debug
-    set NO_OBFUSCATION=1
     set NO_STRIP=1
     shift
     goto parse_args
@@ -39,11 +37,6 @@ if /I "%~1"=="--release" (
 if /I "%~1"=="--ndk" (
     set NDK_PATH=%~2
     shift
-    shift
-    goto parse_args
-)
-if /I "%~1"=="--no-obfuscation" (
-    set NO_OBFUSCATION=1
     shift
     goto parse_args
 )
@@ -72,9 +65,6 @@ set CMAKE_OPTIONS=-DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DBUILD_SOCKET_INTERFACE=ON
 
 if not "%NDK_PATH%"=="" (
     set CMAKE_OPTIONS=!CMAKE_OPTIONS! -DANDROID_NDK=%NDK_PATH%
-)
-if %NO_OBFUSCATION%==1 (
-    set CMAKE_OPTIONS=!CMAKE_OPTIONS! -DENABLE_OBFUSCATION=OFF
 )
 if %NO_STRIP%==1 (
     set CMAKE_OPTIONS=!CMAKE_OPTIONS! -DENABLE_STRIP=OFF
@@ -122,10 +112,9 @@ echo.
 echo 选项:
 echo     -h, --help              显示此帮助信息
 echo     --clean                 清理构建目录
-echo     --debug                 调试构建（不混淆，保留符号）
+echo     --debug                 调试构建（保留符号）
 echo     --release               发布构建（默认）
 echo     --ndk ^<path^>            指定 NDK 路径
-echo     --no-obfuscation        禁用代码混淆
 echo     --no-strip              禁用符号剥离
 echo.
 echo 示例:

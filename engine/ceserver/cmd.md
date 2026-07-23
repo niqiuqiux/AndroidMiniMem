@@ -1,6 +1,6 @@
 # MiniMem Socket 通信协议
 
-精简版后端（`mini_server`）的二进制通信协议。客户端通过 TCP Socket 连接，每条命令以**单字节 opcode** 开头，后跟对应的参数结构体/数据块。所有命令由 `CEServer.cpp` 的 `DispatchCommand_V2` 分发。
+精简版后端（`minimem_server`）的二进制通信协议。客户端通过 TCP Socket 连接，每条命令以**单字节 opcode** 开头，后跟对应的参数结构体/数据块。所有命令由 `CEServer.cpp` 的 `DispatchCommand_V2` 分发。
 
 > 本精简版**不含**数据搜索 / 指针扫描 / 冻结 / SO注入 / 远程mmap / 线程上下文 / CE风格调试事件 / 旧式快照(Process32/Module32) 等命令。
 

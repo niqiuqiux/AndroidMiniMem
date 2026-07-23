@@ -25,7 +25,7 @@ AndroidMiniMem 是一个**精简版** Android 远程内存调试工具，由 `an
 
 ## 构建
 
-- 后端：`cd engine && ./build.sh`（需 `-DANDROID_NDK=`），产物 `bin/socket_server`。
+- 后端：`cd engine && ./build.sh`（需 `-DANDROID_NDK=`），产物 `bin/minimem_server`。
 - 前端：`cd gui && cmake -S . -B build -G Ninja && cmake --build build`，需 `third_party/LuaJIT`，产物 `bin/MiniMemClient.exe`。Capstone/Keystone 可选（Lua 反汇编/汇编）。
 - MCP：`cd mcp && pip install -e .`，命令 `minimem-mcp`（包名为 `minimem_mcp`）。
 

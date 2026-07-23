@@ -2,7 +2,7 @@
   "version": 3,
   "cmakeMinimumRequired": {
     "major": 3,
-    "minor": 18,
+    "minor": 21,
     "patch": 0
   },
   "configurePresets": [
@@ -14,19 +14,17 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "BUILD_SOCKET_INTERFACE": "ON",
-        "ENABLE_OBFUSCATION": "OFF",
         "ENABLE_STRIP": "ON"
       }
     },
     {
       "name": "debug",
       "displayName": "调试配置",
-      "description": "调试构建（不混淆，保留符号）",
+      "description": "调试构建（保留符号）",
       "inherits": "default",
       "binaryDir": "${sourceDir}/build/debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "ENABLE_OBFUSCATION": "OFF",
         "ENABLE_STRIP": "OFF"
       }
     },

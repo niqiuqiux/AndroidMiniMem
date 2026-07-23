@@ -5,14 +5,13 @@
 # ----------------------------------------------------------------------------
 # Socket Server 可执行文件（设备端常驻服务，供 Windows GUI / MCP 连接）
 # ----------------------------------------------------------------------------
-add_executable(mini_server
+add_executable(minimem_server
     server.cpp
 )
 
-target_link_libraries(mini_server PRIVATE
+target_link_libraries(minimem_server PRIVATE
     server_core
     common_interface
 )
 
-apply_obfuscation(mini_server)
-apply_strip(mini_server)
+apply_strip(minimem_server)

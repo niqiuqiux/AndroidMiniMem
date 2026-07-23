@@ -14,7 +14,7 @@ MCP ▶ IPC ┘         │ 校验/目标快照/复合事务      │
                     └───────────────────────────▶ gui/socket/client_singleton.h
                                                    │ 线协议单一真相源
                                                    ▼
-                                             engine/mini_server
+                                             engine/minimem_server
 ```
 
 - **设备协议的单一真相源是 `gui/socket/client_singleton.h` 的自由函数**（`ReadProcessMemoryBytes` / `WriteProcessMemoryBytes` / `ReadBratchAddr` / `SetKernelBreakpoint` / `ResolveModuleOffsetChain` / `SymbolFind` …）。

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.21)
 
 # ============================================================================
 # Android MiniMem Engine - CMake 配置
@@ -7,39 +7,35 @@ cmake_minimum_required(VERSION 3.18)
 # 已剥离：数据搜索 / 指针扫描 / 冻结列表 / SO注入 / 多余接口(pipe/stdio/uds/jni)。
 # ============================================================================
 
-if(UNIX AND NOT APPLE)
-    set(LINUX_HOME_DIR "$ENV{HOME}")
-    if(LINUX_HOME_DIR STREQUAL "/home/ni")
-        set(DEFAULT_ANDROID_NDK_PATH "/home/ni/android-ndk-r27c")
-    elseif(LINUX_HOME_DIR STREQUAL "/home/qiu")
-        set(DEFAULT_ANDROID_NDK_PATH "/home/qiu/Android/android-ndk-r28c")
-    else()
-        set(DEFAULT_ANDROID_NDK_PATH "${LINUX_HOME_DIR}/Android/android-ndk-r28c")
+# ----------------------------------------------------------------------------
+# NDK 工具链。支持标准 CMAKE_TOOLCHAIN_FILE，也兼容现有的 -DANDROID_NDK=。
+# ----------------------------------------------------------------------------
+if(NOT CMAKE_TOOLCHAIN_FILE)
+    set(_MINIMEM_NDK "${ANDROID_NDK}")
+    if(NOT _MINIMEM_NDK AND DEFINED ENV{ANDROID_NDK_HOME})
+        set(_MINIMEM_NDK "$ENV{ANDROID_NDK_HOME}")
+    elseif(NOT _MINIMEM_NDK AND DEFINED ENV{ANDROID_NDK_ROOT})
+        set(_MINIMEM_NDK "$ENV{ANDROID_NDK_ROOT}")
+    elseif(NOT _MINIMEM_NDK AND DEFINED ENV{ANDROID_NDK})
+        set(_MINIMEM_NDK "$ENV{ANDROID_NDK}")
     endif()
+
+    if(NOT _MINIMEM_NDK)
+        message(FATAL_ERROR
+            "未指定 Android NDK。请设置 ANDROID_NDK_HOME，或传入 "
+            "-DANDROID_NDK=<path> / -DCMAKE_TOOLCHAIN_FILE=<path>。")
+    endif()
+
+    set(_MINIMEM_TOOLCHAIN "${_MINIMEM_NDK}/build/cmake/android.toolchain.cmake")
+    if(NOT EXISTS "${_MINIMEM_TOOLCHAIN}")
+        message(FATAL_ERROR "Android NDK 工具链不存在：${_MINIMEM_TOOLCHAIN}")
+    endif()
+    set(CMAKE_TOOLCHAIN_FILE "${_MINIMEM_TOOLCHAIN}" CACHE FILEPATH
+        "Android NDK CMake toolchain")
 endif()
 
-# ----------------------------------------------------------------------------
-# NDK 路径配置（优先环境变量 ANDROID_NDK，否则默认路径，可用 -DANDROID_NDK= 覆盖）
-# ----------------------------------------------------------------------------
-if(NOT DEFINED ANDROID_NDK)
-    if(WIN32)
-        set(CMAKE_ANDROID_NDK "D:/ndkollvm/android-ndk-r27c-windows/android-ndk-r27c"
-            CACHE PATH "Android NDK path")
-    else()
-        set(CMAKE_ANDROID_NDK "${DEFAULT_ANDROID_NDK_PATH}"
-            CACHE PATH "Android NDK path")
-    endif()
-else()
-    set(CMAKE_ANDROID_NDK ${ANDROID_NDK})
-endif()
-
-set(CMAKE_SYSTEM_NAME ANDROID)
-set(CMAKE_TOOLCHAIN_FILE ${CMAKE_ANDROID_NDK}/build/cmake/android.toolchain.cmake)
-
-set(CMAKE_ANDROID_ARCH_ABI arm64-v8a)
-set(ANDROID_ABI arm64-v8a)
-set(ANDROID_PLATFORM android-26)
-set(ANDROID_NDK ${CMAKE_ANDROID_NDK})
+set(ANDROID_ABI "arm64-v8a" CACHE STRING "Android ABI")
+set(ANDROID_PLATFORM "android-26" CACHE STRING "Android API level")
 
 # ============================================================================
 # 项目定义
@@ -50,19 +46,32 @@ project(android_minimem_engine
     DESCRIPTION "Android MiniMem Engine (进程/模块/读写/断点/内核切换)"
 )
 
+if(NOT ANDROID)
+    message(FATAL_ERROR "android_minimem_engine 只能使用 Android NDK 工具链构建")
+endif()
+
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "构建类型" FORCE)
+endif()
+
 # ----------------------------------------------------------------------------
 # 构建选项
 # ----------------------------------------------------------------------------
 option(BUILD_SOCKET_INTERFACE "构建 Socket 接口" ON)
-option(ENABLE_OBFUSCATION "启用代码混淆" OFF)
 option(ENABLE_STRIP "构建后自动 strip 符号" ON)
 
 # ----------------------------------------------------------------------------
 # 输出目录
 # ----------------------------------------------------------------------------
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib)
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib)
+if(NOT CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
+endif()
+if(NOT CMAKE_LIBRARY_OUTPUT_DIRECTORY)
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib)
+endif()
+if(NOT CMAKE_ARCHIVE_OUTPUT_DIRECTORY)
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/lib)
+endif()
 
 # ----------------------------------------------------------------------------
 # C/C++ 标准与编译选项
@@ -72,10 +81,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-
-set(COMMON_COMPILE_FLAGS "-fvisibility=hidden -Wno-format")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${COMMON_COMPILE_FLAGS}")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${COMMON_COMPILE_FLAGS}")
 
 # ----------------------------------------------------------------------------
 # 公共接口库（共享 include 路径与系统库）
@@ -90,6 +95,11 @@ target_include_directories(common_interface INTERFACE
 
 target_compile_definitions(common_interface INTERFACE
     ANDROID_CHEAT_ENGINE
+)
+
+target_compile_options(common_interface INTERFACE
+    -fvisibility=hidden
+    -Wno-format
 )
 
 target_link_libraries(common_interface INTERFACE
@@ -113,12 +123,8 @@ add_library(server_core STATIC
 target_link_libraries(server_core PUBLIC common_interface)
 
 # ----------------------------------------------------------------------------
-# 混淆 / Strip 辅助函数（保留接口，便于 release 构建）
+# Strip 辅助函数
 # ----------------------------------------------------------------------------
-function(apply_obfuscation target)
-    # MiniMem 默认不启用混淆；如需可在此接入 LLVM 混淆插件
-endfunction()
-
 function(apply_strip target)
     if(ENABLE_STRIP AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
         add_custom_command(TARGET ${target} POST_BUILD

@@ -30,7 +30,7 @@ AndroidMiniMem/
               gui/mem/ IMemService（校验、目标快照、复合事务）
                                   │ 调用 socket/client_singleton.h 协议层
                                   ▼
-              gui/ WinSocketClientMgr ──(TCP)──▶ engine/ mini_server (Android 设备)
+              gui/ WinSocketClientMgr ──(TCP)──▶ engine/ minimem_server (Android 设备)
                                                       │
                                                       ▼
                     内存读写（内核 / syscall）与断点（内核 / perf）/ 符号
@@ -70,7 +70,7 @@ AndroidMiniMem/
 
 ### 1. 后端引擎 `engine/`（Android ARM64）
 
-需要 Android NDK（r27c/r28c）。产物为设备端可执行文件 `bin/mini_server`。
+需要 Android NDK（r27c/r28c）。产物为设备端可执行文件 `bin/minimem_server`。
 
 ```bash
 cd engine
@@ -81,11 +81,11 @@ cmake -S . -B build -DANDROID_NDK=<ndk路径> -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-把 `mini_server`（及内核驱动 `Mem.ko`/`CFI.ko`，如使用内核模式）推送到设备并以 root 运行，监听端口（默认 52736）。
+把 `minimem_server`（及内核驱动 `Mem.ko`/`CFI.ko`，如使用内核模式）推送到设备并以 root 运行，监听端口（默认 52736）。
 
-### 2. 前端 GUI `gui/`（Windows x64）
+### 2. 前端 GUI `gui/`（Windows x64 / Linux x64）
 
-需要 Visual Studio 2022 / Clang、CMake、DirectX 12 SDK，以及 `third_party/LuaJIT`（必需）。Capstone/Keystone 可选（启用 Lua 反汇编/汇编）。
+Windows 需要 Visual Studio 2022 / Clang、CMake、DirectX 12 SDK，以及仓库内的 `third_party/LuaJIT`。Linux 使用 GLFW + OpenGL3，并通过 pkg-config 查找 LuaJIT；Debian/Ubuntu 可安装 `libgl1-mesa-dev libglfw3-dev libluajit2-5.1-dev libcapstone-dev pkg-config`。Capstone/Keystone 可选，用于 Lua 反汇编/汇编。
 
 ```bash
 cd gui
@@ -94,7 +94,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-产物 `bin/MiniMemClient.exe`，启动后自动在 `127.0.0.1:28100` 开启 IPC 服务。IPC 仅接受无非空 `Origin`、具有唯一 `Content-Length` 且 `Content-Type` 为 `application/json` 的 POST 请求，不开放浏览器 CORS，也不接受 `Transfer-Encoding`。
+产物为 Windows 的 `bin/MiniMemClient.exe` 或 Linux 的 `bin/MiniMemClient`，启动后自动在 `127.0.0.1:28100` 开启 IPC 服务。IPC 仅接受无非空 `Origin`、具有唯一 `Content-Length` 且 `Content-Type` 为 `application/json` 的 POST 请求，不开放浏览器 CORS，也不接受 `Transfer-Encoding`。
 
 ### 3. MCP 服务 `mcp/`（Python 3.10+）
 
