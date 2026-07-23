@@ -22,6 +22,10 @@
 #include <exception>
 #include <new>
 
+#if defined(__GNUC__) && !defined(_WIN32)
+#include <cxxabi.h>
+#endif
+
 // 辅助函数：将 Lua 值转换为字符串（Lua 5.1 兼容版本）
 static const char* luaL_tolstring_compat(lua_State* L, int idx, size_t* len) {
     // Lua 5.1 兼容：手动计算绝对索引
@@ -215,6 +219,13 @@ int LuaAPI::InvokeProtected(lua_State* L,
                       what ? what : "<no message>");
         failed = true;
     } catch (...) {
+#if defined(__GNUC__) && !defined(_WIN32)
+        // Linux LuaJIT 可通过 ABI 的外部异常实现 lua_error。它没有 C++
+        // type_info，必须继续展开到 lua_pcall，不能当成未知宿主异常。
+        if (__cxxabiv1::__cxa_current_exception_type() == nullptr) {
+            throw;
+        }
+#endif
         std::snprintf(exceptionMessage, sizeof(exceptionMessage),
                       "MiniMem host API '%s' raised an unknown C++ exception",
                       apiName ? apiName : "<unknown>");
