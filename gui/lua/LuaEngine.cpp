@@ -479,7 +479,9 @@ int CapturePrintImpl(lua_State* state) {
 }
 
 int CapturePrint(lua_State* state) {
-    return LuaAPI::InvokeProtected(state, CapturePrintImpl, "print");
+    lua_pushvalue(state, lua_upvalueindex(1));
+    return LuaAPI::InvokeProtected(
+        state, CapturePrintImpl, "print", 1);
 }
 
 int AbsoluteIndex(lua_State* state, int index) {

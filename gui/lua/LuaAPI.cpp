@@ -22,10 +22,6 @@
 #include <exception>
 #include <new>
 
-#if defined(__GNUC__) && !defined(_WIN32)
-#include <cxxabi.h>
-#endif
-
 // 辅助函数：将 Lua 值转换为字符串（Lua 5.1 兼容版本）
 static const char* luaL_tolstring_compat(lua_State* L, int idx, size_t* len) {
     // Lua 5.1 兼容：手动计算绝对索引
@@ -200,17 +196,36 @@ void LuaAPI::PushProtectedFunction(lua_State* L,
 
 int LuaAPI::InvokeProtected(lua_State* L,
                             lua_CFunction function,
-                            const char* apiName) {
+                            const char* apiName,
+                            int forwardedUpvalueCount) {
     if (!function) {
         return luaL_error(L, "invalid MiniMem Lua API function");
+    }
+    if (forwardedUpvalueCount < 0 ||
+        forwardedUpvalueCount > lua_gettop(L)) {
+        return luaL_error(L, "invalid MiniMem Lua API upvalue count");
     }
 
     LuaDiagnostics::BeginHostCall(L, apiName);
     int resultCount = 0;
     char exceptionMessage[1024]{};
     bool failed = false;
+#ifndef _WIN32
+    const int argumentCount = lua_gettop(L) - forwardedUpvalueCount;
+    lua_pushcclosure(L, function, forwardedUpvalueCount);
+    lua_insert(L, 1);
+    int status = LUA_OK;
+#else
+    lua_pop(L, forwardedUpvalueCount);
+#endif
     try {
+#ifndef _WIN32
+        // 先让 Lua 错误在内层 pcall 收敛，避免 Linux LuaJIT 的外部
+        // 展开对象进入 catch (...)；真正的 C++ 异常仍会穿出 pcall。
+        status = lua_pcall(L, argumentCount, LUA_MULTRET, 0);
+#else
         resultCount = function(L);
+#endif
     } catch (const std::exception& exception) {
         const char* what = exception.what();
         std::snprintf(exceptionMessage, sizeof(exceptionMessage),
@@ -219,26 +234,29 @@ int LuaAPI::InvokeProtected(lua_State* L,
                       what ? what : "<no message>");
         failed = true;
     } catch (...) {
-#if defined(__GNUC__) && !defined(_WIN32)
-        // Linux LuaJIT 可通过 ABI 的外部异常实现 lua_error。它没有 C++
-        // type_info，必须继续展开到 lua_pcall，不能当成未知宿主异常。
-        if (__cxxabiv1::__cxa_current_exception_type() == nullptr) {
-            throw;
-        }
-#endif
         std::snprintf(exceptionMessage, sizeof(exceptionMessage),
                       "MiniMem host API '%s' raised an unknown C++ exception",
                       apiName ? apiName : "<unknown>");
         failed = true;
     }
 
-    if (!failed) {
-        LuaDiagnostics::EndHostCall();
-        return resultCount;
+    if (failed) {
+#ifndef _WIN32
+        lua_settop(L, 0);
+#endif
+        lua_pushstring(L, exceptionMessage);
+        return lua_error(L);
     }
 
-    lua_pushstring(L, exceptionMessage);
-    return lua_error(L);
+#ifndef _WIN32
+    if (status != LUA_OK) {
+        return lua_error(L);
+    }
+    resultCount = lua_gettop(L);
+#endif
+
+    LuaDiagnostics::EndHostCall();
+    return resultCount;
 }
 
 // ==================== 注册所有API ====================

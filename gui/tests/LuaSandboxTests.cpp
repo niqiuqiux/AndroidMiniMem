@@ -340,10 +340,16 @@ void testGuiCallbackScopeRecovery() {
     if (result.success) {
         result = LuaEngine::GetInstance().InvokeGuiCallback(
             "sandbox_extra_end_callback", 1);
-        check(!result.success &&
-                  result.error.find("without a matching imgui.begin") !=
-                      std::string::npos &&
-                  result.error.find("stack traceback:") != std::string::npos,
+        const bool extraEndRejected =
+            !result.success &&
+            result.error.find("without a matching imgui.begin") !=
+                std::string::npos &&
+            result.error.find("stack traceback:") != std::string::npos;
+        if (!extraEndRejected) {
+            std::cerr << "Extra imgui.end callback result: success="
+                      << result.success << ", error=" << result.error << '\n';
+        }
+        check(extraEndRejected,
               "Lua must not be able to close the host ImGui window");
 
         result = LuaEngine::GetInstance().InvokeGuiCallback(

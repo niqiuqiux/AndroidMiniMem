@@ -37,7 +37,8 @@ public:
     static void PushProtectedFunction(
         lua_State* L, lua_CFunction function, const char* apiName);
     static int InvokeProtected(
-        lua_State* L, lua_CFunction function, const char* apiName);
+        lua_State* L, lua_CFunction function, const char* apiName,
+        int forwardedUpvalueCount = 0);
 
     // ==================== 内存操作API ====================
     // 已移至 LuaAPI_Memory.h
