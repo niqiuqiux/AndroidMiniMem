@@ -18,7 +18,7 @@ Windows 产物 `bin/MiniMemClient.exe`，依赖 DirectX 12 SDK、Windows SDK。L
 - `socket/client_singleton.h/.cpp` — 设备协议**单一真相源**，`WinSocketClientMgr` 管理三端口（MAIN/DEBUG/ERROR）。命令实现按域拆分：`ProcessCommands` / `MemoryCommands` / `BreakpointCommands` / `SymbolCommands`（**无** Scan/Freeze）。
 - `mem/` — GUI、Lua、IPC 的统一业务边界。`MemService` 负责校验与目标快照，`SystemMemService` 是唯一进入 socket 协议层的适配器。
 - `ipc/IpcHttpRequest.*` + `ipc/IpcServer.cpp` — 可测试的 HTTP 边界与 loopback 服务（127.0.0.1:28100），`RegisterBuiltinMethods()` 注册保留能力，是 MCP 的桥梁。
-- `gui/` — 窗口：`CEWindow`(主控/进程选择) `ServerConnectWindow` `ModulesWindow` `LogWindow` `VersionWindow` `LuaScriptWindow` `LuaImGuiWindow`；`Window` 基类、`Gui` 命名空间、`AppContext`（进程状态 + 模块/符号缓存）。
+- `gui/` — 窗口：`CEWindow`(主控/进程选择) `ServerConnectWindow` `ModulesWindow` `UxnBreakpointWindow` `LogWindow` `VersionWindow` `LuaScriptWindow` `LuaImGuiWindow`；`Window` 基类、`Gui` 命名空间、`AppContext`（进程状态 + 模块/符号缓存）。
 - `lua/` — `LuaEngine` + `LuaAPI`(进程/模块/断点) / `LuaAPI_Memory`(读写) / `LuaAPI_ImGui`(绘制) / `LuaAPI_Assembly`(汇编，Capstone/Keystone 门控)。Lua 用于复杂分析，可被 GUI 与 IPC `execute_lua` 触发。
 
 ## 重要：已移除的能力

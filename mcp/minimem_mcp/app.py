@@ -24,7 +24,7 @@ def build_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> tuple[Fa
         instructions=(
             f"MiniMem Android 内存调试 MCP 服务 v{__version__}（二进制协议 v{PROTOCOL_VERSION}）"
             " — 通过 GUI IPC 桥接，"
-            "支持进程/模块列表、内存读写、硬件断点、ELF 符号、Lua 脚本执行"
+            "支持进程/模块列表、内存读写、硬件断点、UXN 异常断点、ELF 符号、Lua 脚本执行"
             "（不含数据搜索/指针扫描/冻结）"
         ),
     )

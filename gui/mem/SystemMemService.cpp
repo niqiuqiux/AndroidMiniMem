@@ -40,6 +40,58 @@ BreakpointMutationBackendResult toBreakpointBackendResult(
         io.requestStarted, io.responseReceived, io.applied};
 }
 
+UxnOperationBackendResult toUxnBackendResult(
+    const UxnOperationIoResult& io) {
+    return UxnOperationBackendResult{
+        io.requestStarted, io.responseReceived, io.applied, io.errorCode};
+}
+
+UxnRegisters toUxnRegisters(const CeUxnRegisters& source) {
+    UxnRegisters output;
+    std::copy(std::begin(source.registers), std::end(source.registers),
+              output.general.begin());
+    output.stackPointer = source.stackPointer;
+    output.programCounter = source.programCounter;
+    output.pstate = source.pstate;
+    return output;
+}
+
+CeUxnRegisters toWireUxnRegisters(const UxnRegisters& source) {
+    CeUxnRegisters output{};
+    std::copy(source.general.begin(), source.general.end(),
+              std::begin(output.registers));
+    output.stackPointer = source.stackPointer;
+    output.programCounter = source.programCounter;
+    output.pstate = source.pstate;
+    return output;
+}
+
+UxnEvent toUxnEvent(const CeUxnEvent& source) {
+    UxnEvent output;
+    output.slot = source.slot;
+    output.pid = source.pid;
+    output.tid = source.tid;
+    output.state = static_cast<UxnState>(source.state);
+    output.sequence = source.sequence;
+    output.address = source.address;
+    output.page = source.page;
+    output.faultAddress = source.faultAddress;
+    output.esr = source.esr;
+    output.hits = source.hits;
+    output.falseHits = source.falseHits;
+    output.registers = toUxnRegisters(source.registers);
+    for (size_t i = 0; i < output.fpsimd.vector.size(); ++i) {
+        output.fpsimd.vector[i] = UxnFpRegister{
+            source.fpsimd.registers[i].low,
+            source.fpsimd.registers[i].high};
+    }
+    output.fpsimd.fpsr = source.fpsimd.fpsr;
+    output.fpsimd.fpcr = source.fpsimd.fpcr;
+    output.fpsimd.valid =
+        (source.fpsimd.flags & CE_UXN_FPSIMD_VALID) != 0;
+    return output;
+}
+
 bool fetchSystemModules(std::vector<ModuleInfo>& modules) {
     std::vector<ModuleInfoItem> items;
     if (!FetchModuleList(items, PORT_MAIN)) {
@@ -57,6 +109,14 @@ bool fetchSystemModules(std::vector<ModuleInfo>& modules) {
         modules.push_back(std::move(module));
     }
     return true;
+}
+
+void clearUxnIfKernel() {
+    int memoryType = 0;
+    if (GetMemType(memoryType, PORT_MAIN) &&
+        memoryType == MemType_Kernel) {
+        (void)ClearUxnBreakpointsTracked(PORT_MAIN);
+    }
 }
 
 class SystemReadTransaction final : public IMemReadTransaction {
@@ -186,10 +246,16 @@ public:
     }
 
     bool connect(const std::string& host, uint16_t port) override {
+        if (IsMultiPortConnected()) {
+            clearUxnIfKernel();
+        }
         return ConnectMultiPort(host, port);
     }
 
     bool disconnect() override {
+        if (IsMultiPortConnected()) {
+            clearUxnIfKernel();
+        }
         DisconnectMultiPort();
         return true;
     }
@@ -289,6 +355,7 @@ public:
 
         const TargetSnapshot previous = mutation->previousTarget();
         if (previous.isAttached()) {
+            clearUxnIfKernel();
             (void)ClearTrackedKernelBreakpoints(PORT_MAIN);
             (void)CloseProcessHandle(previous.processHandle, PORT_MAIN);
         }
@@ -471,6 +538,104 @@ public:
             threads.push_back(std::move(thread));
         }
         return true;
+    }
+
+    UxnInstallBackendResult installUxnBreakpoint(
+        const OperationContext& context, uint64_t address) override {
+        SocketCommand::TransactionLease transaction(PORT_MAIN);
+        if (!contextMatches(context, transaction)) {
+            return {};
+        }
+        const UxnInstallIoResult io =
+            InstallUxnBreakpointTracked(address, 0, PORT_MAIN);
+        UxnInstallBackendResult output;
+        static_cast<UxnOperationBackendResult&>(output) =
+            toUxnBackendResult(io);
+        output.pid = io.install.pid;
+        output.flags = io.install.flags;
+        output.address = io.install.address;
+        output.slot = io.install.slot;
+        return output;
+    }
+
+    UxnOperationBackendResult removeUxnBreakpoint(
+        const OperationContext& context, uint64_t address) override {
+        SocketCommand::TransactionLease transaction(PORT_MAIN);
+        if (!contextMatches(context, transaction)) {
+            return {};
+        }
+        return toUxnBackendResult(
+            RemoveUxnBreakpointTracked(address, PORT_MAIN));
+    }
+
+    UxnWaitBackendResult waitUxnBreakpoint(
+        const OperationContext& context, uint32_t slot,
+        uint32_t timeoutMs, uint64_t lastSequence) override {
+        SocketCommand::TransactionLease transaction(PORT_DEBUG);
+        if (!contextMatches(context, transaction)) {
+            return {};
+        }
+        const UxnWaitIoResult io = WaitUxnBreakpointTracked(
+            slot, timeoutMs, lastSequence, PORT_DEBUG);
+        UxnWaitBackendResult output;
+        static_cast<UxnOperationBackendResult&>(output) =
+            toUxnBackendResult(io);
+        output.event = toUxnEvent(io.event);
+        return output;
+    }
+
+    UxnOperationBackendResult resumeUxnBreakpoint(
+        const OperationContext& context, uint32_t slot,
+        bool writeRegisters, const UxnRegisters& registers) override {
+        SocketCommand::TransactionLease transaction(PORT_MAIN);
+        if (!contextMatches(context, transaction)) {
+            return {};
+        }
+        CeUxnResume request{};
+        request.slot = slot;
+        request.flags = writeRegisters ? CE_UXN_RESUME_SET_REGS : 0;
+        if (writeRegisters) {
+            request.registers = toWireUxnRegisters(registers);
+        }
+        return toUxnBackendResult(
+            ResumeUxnBreakpointTracked(request, PORT_MAIN));
+    }
+
+    UxnStatusBackendResult queryUxnBreakpointStatus(
+        const OperationContext& context, uint32_t slot) override {
+        SocketCommand::TransactionLease transaction(PORT_MAIN);
+        if (!contextMatches(context, transaction)) {
+            return {};
+        }
+        const UxnStatusIoResult io =
+            QueryUxnBreakpointStatusTracked(slot, PORT_MAIN);
+        UxnStatusBackendResult output;
+        static_cast<UxnOperationBackendResult&>(output) =
+            toUxnBackendResult(io);
+        output.status.slot = io.status.slot;
+        output.status.used = io.status.used != 0;
+        output.status.pid = io.status.pid;
+        output.status.tid = io.status.tid;
+        output.status.state = static_cast<UxnState>(io.status.state);
+        output.status.lastError = io.status.lastError;
+        output.status.address = io.status.address;
+        output.status.page = io.status.page;
+        output.status.hits = io.status.hits;
+        output.status.falseHits = io.status.falseHits;
+        output.status.stepHits = io.status.stepHits;
+        output.status.resumes = io.status.resumes;
+        output.status.sequence = io.status.sequence;
+        return output;
+    }
+
+    UxnOperationBackendResult clearUxnBreakpoints(
+        const OperationContext& context) override {
+        SocketCommand::TransactionLease transaction(PORT_MAIN);
+        if (!transaction ||
+            transaction.generation() != context.connectionGeneration) {
+            return {};
+        }
+        return toUxnBackendResult(ClearUxnBreakpointsTracked(PORT_MAIN));
     }
 };
 

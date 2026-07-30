@@ -49,7 +49,7 @@ dofile("scripts/ue4_actor_list.lua")
 
 1. 在 MiniMem 中使用 MCP 工具：
 ```
-/mcp amem get_module_base libUE4.so
+/mcp minimem get_module_base libUE4.so
 ```
 
 2. 或在 Lua 中查询模块列表，找到 libUE4.so 的基址

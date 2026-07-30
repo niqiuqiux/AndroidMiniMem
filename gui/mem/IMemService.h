@@ -65,6 +65,23 @@ public:
         const BreakpointHitBatchRequest& request) = 0;
     virtual Result<BreakpointSlotsSnapshot> breakpointSlots(
         const OperationContext& context, uint32_t capacity = kMaxBreakpointQueryEntries) = 0;
+    virtual Result<UxnInstallReceipt> installUxnBreakpoint(
+        const OperationContext& context,
+        const UxnInstallRequest& request) = 0;
+    virtual Result<UxnMutationReceipt> removeUxnBreakpoint(
+        const OperationContext& context,
+        const UxnRemoveRequest& request) = 0;
+    virtual Result<UxnEvent> waitUxnBreakpoint(
+        const OperationContext& context,
+        const UxnWaitRequest& request) = 0;
+    virtual Result<UxnMutationReceipt> resumeUxnBreakpoint(
+        const OperationContext& context,
+        const UxnResumeRequest& request) = 0;
+    virtual Result<UxnStatus> queryUxnBreakpointStatus(
+        const OperationContext& context,
+        const UxnStatusRequest& request) = 0;
+    virtual Result<UxnClearReceipt> clearUxnBreakpoints(
+        const OperationContext& context) = 0;
     virtual Result<SymbolTable> loadSymbolTable(
         const OperationContext& context,
         const SymbolTableRequest& request) = 0;

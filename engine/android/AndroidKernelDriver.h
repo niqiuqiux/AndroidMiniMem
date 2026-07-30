@@ -18,6 +18,7 @@ struct HardwareBreakpointInstallResult {
     int interfaceResult = -1;
     int errorCode = 0;
     uint32_t reclaimedSlots = 0;
+    uint32_t blockedSlots = 0;
 };
 
 struct HardwareBreakpointTaskQueryResult {
@@ -26,6 +27,11 @@ struct HardwareBreakpointTaskQueryResult {
     int errorCode = 0;
     ni_hwbp_task_query summary{};
     std::vector<ni_hwbp_task_entry> entries;
+};
+
+struct UxnOperationResult {
+    bool success = false;
+    int errorCode = 0;
 };
 
 class AndroidKernelDriver {
@@ -66,6 +72,14 @@ public:
     bool ReadHardwareBreakpointInfo(uint64_t handle,
                                     uint64_t& totalHitCount,
                                     std::vector<HW_HIT_ITEM>& out);
+
+    UxnOperationResult InstallUxnBreakpoint(ni_uxn_install& request);
+    UxnOperationResult RemoveUxnBreakpoint(uint32_t pid, uint64_t address);
+    UxnOperationResult WaitUxnBreakpoint(ni_uxn_wait& request);
+    UxnOperationResult ResumeUxnBreakpoint(const ni_uxn_resume& request);
+    UxnOperationResult GetUxnBreakpointStatus(uint32_t slot,
+                                              ni_uxn_status& status);
+    UxnOperationResult ClearUxnBreakpoints();
 
 private:
     NiDriver* driverLocked();

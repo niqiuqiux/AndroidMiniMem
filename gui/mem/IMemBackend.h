@@ -98,6 +98,21 @@ public:
     virtual bool fetchBreakpointSlots(
         const OperationContext& context, uint32_t capacity,
         std::vector<BreakpointThreadSlots>& threads) = 0;
+
+    virtual UxnInstallBackendResult installUxnBreakpoint(
+        const OperationContext& context, uint64_t address) = 0;
+    virtual UxnOperationBackendResult removeUxnBreakpoint(
+        const OperationContext& context, uint64_t address) = 0;
+    virtual UxnWaitBackendResult waitUxnBreakpoint(
+        const OperationContext& context, uint32_t slot,
+        uint32_t timeoutMs, uint64_t lastSequence) = 0;
+    virtual UxnOperationBackendResult resumeUxnBreakpoint(
+        const OperationContext& context, uint32_t slot,
+        bool writeRegisters, const UxnRegisters& registers) = 0;
+    virtual UxnStatusBackendResult queryUxnBreakpointStatus(
+        const OperationContext& context, uint32_t slot) = 0;
+    virtual UxnOperationBackendResult clearUxnBreakpoints(
+        const OperationContext& context) = 0;
 };
 
 } // namespace Mem

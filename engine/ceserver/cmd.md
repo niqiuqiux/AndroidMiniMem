@@ -38,8 +38,22 @@
 | CMD_GETSOBASE | 21 | 按 so 名称获取模块基址 | 参数: `CeGetSoBaseInput` + 名称；返回: `CeGetSoBaseOutput`(result, base) |
 | CMD_SETKERNELHWBPRECLAIM | 22 | 设置 Kernel 断点槽抢占策略 | 参数: uint8 (0=关闭 / 非0=开启)；返回: int (1=已应用 / 0=当前非 Kernel 模式) |
 | CMD_KERNEL_QUERYHWBPTHREADS | 23 | 查询当前进程每个线程的硬件断点槽位 | 参数: int handle + u32 每线程 capacity(1~64)；返回: int 成功标志 + u32 线程数，随后每线程固定摘要及 N×槽位条目；单线程失败保留 errno，不影响其它线程 |
+| CMD_KERNEL_UXN_INSTALL | 24 | 安装 UXN 执行异常断点 | 参数: int handle + u64 地址（4 字节对齐）+ u32 flags（当前必须为 0）；返回: `CeUxnResult` + `ni_uxn_install`（固定 24 字节） |
+| CMD_KERNEL_UXN_REMOVE | 25 | 按进程和地址删除 UXN 断点 | 参数: int handle + u64 地址；返回: `CeUxnResult` |
+| CMD_KERNEL_UXN_WAIT | 26 | 等待 UXN 命中事件 | 参数: u32 slot（0~15，`UINT32_MAX` 表示任意）+ u32 timeout_ms（1~60000）+ u64 last_seq；返回: `CeUxnResult` + `ni_uxn_event`（固定 880 字节） |
+| CMD_KERNEL_UXN_RESUME | 27 | 恢复 UXN 命中线程，可写回通用寄存器 | 参数: `ni_uxn_resume`（固定 280 字节）；返回: `CeUxnResult` |
+| CMD_KERNEL_UXN_STATUS | 28 | 查询 UXN 槽位状态与统计 | 参数: u32 slot（0~15）；返回: `CeUxnResult` + `ni_uxn_status`（固定 80 字节） |
+| CMD_KERNEL_UXN_CLEAR | 29 | 清空驱动内全部 UXN 断点并释放暂停线程 | 无参数；返回: `CeUxnResult` |
 
 > 断点类型 `type`：1=读 / 2=写 / 3=读写 / 4=执行（执行断点长度固定 4）。
+
+### UXN 接口约定
+
+- `CeUxnResult` 固定为两个 `int32`：`result`（1 成功 / 0 失败）与 `errorCode`（成功为 0，失败为 Linux errno）。`INSTALL`、`WAIT`、`STATUS` 无论成功失败都会继续发送固定长度 payload，失败时 payload 清零，客户端必须完整读取。
+- UXN 槽位状态：0=`EMPTY`、1=`ARMED`、2=`PAUSED`、3=`STEPPING`。同一进程同一页只能安装一个断点，驱动全局最多 16 个槽位。
+- `WAIT` 事件包含 X0-X30、SP、PC、PSTATE 及 V0-V31、FPSR、FPCR；事件偏移 40 的 FAR 字段在后端 C++ 中命名为 `fault_address`，线布局仍与驱动 `far` 完全一致。FPSIMD 仅供读取，`NI_UXN_REGS_F_FPSIMD_VALID` 表示快照有效。
+- `RESUME` 的 flags 为 0 时直接恢复；设置 `NI_UXN_RESUME_F_SET_REGS` 时写回 X0-X30、SP、PC 与 PSTATE 中允许的 NZCV 位。等待中的目标线程只有收到 `RESUME`、`REMOVE` 或 `CLEAR` 才会释放。
+- 建议用独立连接执行 `WAIT`，用另一连接执行 `RESUME` / `REMOVE` / `CLEAR`；单次等待超时限制为 1~60000 ms，继续等待时把上次事件的 `seq` 作为新的 `last_seq`。
 
 ## 3. 内存读写传输语义（连续前缀）
 

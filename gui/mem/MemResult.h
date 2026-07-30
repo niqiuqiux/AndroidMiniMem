@@ -50,6 +50,7 @@ struct Error {
     std::string message;
     bool retryable = false;
     std::optional<uint64_t> affectedBytes;
+    std::optional<int32_t> nativeCode;
 };
 
 template<typename T>
@@ -64,10 +65,12 @@ public:
     static Result failure(ErrorCode code,
                           std::string message,
                           bool retryable = false,
-                          std::optional<uint64_t> affectedBytes = std::nullopt) {
+                          std::optional<uint64_t> affectedBytes = std::nullopt,
+                          std::optional<int32_t> nativeCode = std::nullopt) {
         Result result;
         result.error_.emplace(
-            Error{code, std::move(message), retryable, affectedBytes});
+            Error{code, std::move(message), retryable, affectedBytes,
+                  nativeCode});
         return result;
     }
 

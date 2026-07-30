@@ -60,6 +60,14 @@
 #define CMD_SETKERNELHWBPRECLAIM     22  // 设置内核断点槽抢占开关
 #define CMD_KERNEL_QUERYHWBPTHREADS  23  // 查询进程内各线程硬件断点槽位
 
+// —— Kernel UXN 异常断点 ——
+#define CMD_KERNEL_UXN_INSTALL       24
+#define CMD_KERNEL_UXN_REMOVE        25
+#define CMD_KERNEL_UXN_WAIT          26
+#define CMD_KERNEL_UXN_RESUME        27
+#define CMD_KERNEL_UXN_STATUS        28
+#define CMD_KERNEL_UXN_CLEAR         29
+
 // ============================================================================
 // 协议结构体
 // ============================================================================
@@ -210,10 +218,17 @@ struct HwbpTaskSlot {
 	uint32_t reserved;
 };
 
+struct CeUxnResult {
+	int32_t result;
+	int32_t errorCode;
+};
+
 static_assert(sizeof(HwbpTaskThreadHeader) == 48,
 	              "HwbpTaskThreadHeader ABI size mismatch");
 static_assert(sizeof(HwbpTaskSlot) == 56,
 	              "HwbpTaskSlot ABI size mismatch");
+static_assert(sizeof(CeUxnResult) == 8,
+	              "CeUxnResult ABI size mismatch");
 
 #pragma pack()
 

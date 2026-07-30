@@ -29,6 +29,7 @@ private:
     void openLuaScriptWindow();
     void openServerConnectWindow();
     void openLogWindow();
+    void openUxnBreakpointWindow();
 
     // 状态变量
     bool openProcessModal = false;

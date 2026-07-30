@@ -174,7 +174,100 @@ std::optional<Error> resolveModuleByBase(
 template<typename T>
 Result<T> failureFrom(const Error& error) {
     return Result<T>::failure(error.code, error.message, error.retryable,
-                              error.affectedBytes);
+                              error.affectedBytes, error.nativeCode);
+}
+
+template<typename T>
+Result<T> uxnNativeFailure(const char* operation, int32_t nativeCode) {
+    constexpr int32_t kLinuxEperm = 1;
+    constexpr int32_t kLinuxEacces = 13;
+    constexpr int32_t kLinuxEinval = 22;
+    constexpr int32_t kLinuxEopnotsupp = 95;
+    constexpr int32_t kLinuxEtimedout = 110;
+    constexpr int32_t kLinuxEcanceled = 125;
+    ErrorCode code = ErrorCode::ProtocolError;
+    bool retryable = false;
+    switch (nativeCode) {
+    case kLinuxEinval:
+        code = ErrorCode::InvalidArgument;
+        break;
+    case kLinuxEtimedout:
+        code = ErrorCode::Timeout;
+        retryable = true;
+        break;
+    case kLinuxEacces:
+    case kLinuxEperm:
+    case kLinuxEopnotsupp:
+        code = ErrorCode::PermissionDenied;
+        break;
+    case kLinuxEcanceled:
+        code = ErrorCode::CancelRequested;
+        break;
+    default:
+        break;
+    }
+    std::ostringstream message;
+    message << "UXN " << operation << " failed";
+    if (nativeCode > 0) {
+        message << " (Linux errno " << nativeCode << ")";
+    }
+    return Result<T>::failure(
+        code, message.str(), retryable, std::nullopt, nativeCode);
+}
+
+template<typename T>
+std::optional<Result<T>> validateUxnIoResult(
+    const OperationContext& context,
+    const UxnOperationBackendResult& backendResult,
+    IMemBackend& backend,
+    const char* operation,
+    bool requireTarget) {
+    if (!backendResult.responseReceived) {
+        if (backendResult.requestStarted) {
+            return Result<T>::failure(
+                ErrorCode::CompletionUnknown,
+                std::string("UXN ") + operation +
+                    " was sent but no complete response was received; reconnect before continuing",
+                false);
+        }
+        const uint64_t generation = backend.connectionGeneration();
+        if (generation != context.connectionGeneration) {
+            return Result<T>::failure(
+                backend.isPoisoned() ? ErrorCode::ConnectionPoisoned
+                                     : ErrorCode::ConnectionChanged,
+                "connection changed before the UXN request could be sent",
+                true);
+        }
+        if (backend.isPoisoned()) {
+            return Result<T>::failure(
+                ErrorCode::ConnectionPoisoned,
+                "connection is poisoned and must be reconnected", true);
+        }
+        if (!backend.isConnected()) {
+            return Result<T>::failure(
+                ErrorCode::NotConnected,
+                "MiniMem is not connected to the Android server", true);
+        }
+        if (requireTarget &&
+            (!context.target || backend.targetSnapshot() != *context.target)) {
+            return Result<T>::failure(
+                ErrorCode::TargetChanged,
+                "target changed before the UXN request could be sent");
+        }
+        return Result<T>::failure(
+            ErrorCode::ProtocolError,
+            std::string("UXN ") + operation + " could not be sent", true);
+    }
+    if (!backendResult.applied) {
+        return uxnNativeFailure<T>(operation, backendResult.errorCode);
+    }
+    if (backendResult.errorCode != 0) {
+        return Result<T>::failure(
+            ErrorCode::ProtocolError,
+            std::string("UXN ") + operation +
+                " returned an invalid success error code");
+    }
+    return std::nullopt;
 }
 
 const char* breakpointActionName(BreakpointAction action) {
@@ -255,6 +348,27 @@ std::optional<Error> MemService::validateContext(
         }
     }
     return std::nullopt;
+}
+
+std::optional<Error> MemService::requireKernelMemoryMode(
+    const OperationContext& context,
+    bool requireTarget) const {
+    int memoryType = 0;
+    std::string memoryTypeName;
+    if (!backend_.fetchMemoryType(memoryType, memoryTypeName)) {
+        if (const auto error = validateContext(
+                context, true, requireTarget, false)) {
+            return error;
+        }
+        return Error{ErrorCode::ProtocolError,
+                     "failed to query current memory mode", true};
+    }
+    if (memoryType != kKernelMemoryType) {
+        return Error{ErrorCode::PermissionDenied,
+                     "UXN exception breakpoints require Kernel memory mode",
+                     false};
+    }
+    return validateContext(context, true, requireTarget, true);
 }
 
 Result<Status> MemService::status(const OperationContext& context) {
@@ -1181,6 +1295,216 @@ Result<BreakpointSlotsSnapshot> MemService::breakpointSlots(
     snapshot.threads = std::move(threads);
     snapshot.target = *context.target;
     return Result<BreakpointSlotsSnapshot>::success(std::move(snapshot));
+}
+
+Result<UxnInstallReceipt> MemService::installUxnBreakpoint(
+    const OperationContext& context,
+    const UxnInstallRequest& request) {
+    if (request.address == 0 || (request.address & 3u) != 0) {
+        return Result<UxnInstallReceipt>::failure(
+            ErrorCode::InvalidArgument,
+            "UXN breakpoint address must be non-zero and 4-byte aligned");
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<UxnInstallReceipt>(*error);
+    }
+    if (const auto error = requireKernelMemoryMode(context, true)) {
+        return failureFrom<UxnInstallReceipt>(*error);
+    }
+    std::lock_guard<std::mutex> lock(uxnControlMutex_);
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<UxnInstallReceipt>(*error);
+    }
+    const UxnInstallBackendResult backendResult =
+        backend_.installUxnBreakpoint(context, request.address);
+    if (const auto failure = validateUxnIoResult<UxnInstallReceipt>(
+            context, backendResult, backend_, "install", true)) {
+        return *failure;
+    }
+    if (backendResult.pid != static_cast<uint32_t>(context.target->pid) ||
+        backendResult.address != request.address ||
+        backendResult.flags != 0 || backendResult.slot >= kMaxUxnSlots) {
+        return Result<UxnInstallReceipt>::failure(
+            ErrorCode::ProtocolError,
+            "UXN install response does not match the requested target");
+    }
+    if (const auto error = validateContext(context, true, true, false)) {
+        return Result<UxnInstallReceipt>::failure(
+            ErrorCode::CompletionUnknown,
+            "UXN install completed after the original target changed");
+    }
+    return Result<UxnInstallReceipt>::success(
+        UxnInstallReceipt{backendResult.slot, backendResult.address,
+                          *context.target});
+}
+
+Result<UxnMutationReceipt> MemService::removeUxnBreakpoint(
+    const OperationContext& context,
+    const UxnRemoveRequest& request) {
+    if (request.address == 0 || (request.address & 3u) != 0) {
+        return Result<UxnMutationReceipt>::failure(
+            ErrorCode::InvalidArgument,
+            "UXN breakpoint address must be non-zero and 4-byte aligned");
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<UxnMutationReceipt>(*error);
+    }
+    if (const auto error = requireKernelMemoryMode(context, true)) {
+        return failureFrom<UxnMutationReceipt>(*error);
+    }
+    std::lock_guard<std::mutex> lock(uxnControlMutex_);
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<UxnMutationReceipt>(*error);
+    }
+    const UxnOperationBackendResult backendResult =
+        backend_.removeUxnBreakpoint(context, request.address);
+    if (const auto failure = validateUxnIoResult<UxnMutationReceipt>(
+            context, backendResult, backend_, "remove", true)) {
+        return *failure;
+    }
+    if (const auto error = validateContext(context, true, true, false)) {
+        return Result<UxnMutationReceipt>::failure(
+            ErrorCode::CompletionUnknown,
+            "UXN remove completed after the original target changed");
+    }
+    return Result<UxnMutationReceipt>::success(
+        UxnMutationReceipt{0, request.address, *context.target});
+}
+
+Result<UxnEvent> MemService::waitUxnBreakpoint(
+    const OperationContext& context,
+    const UxnWaitRequest& request) {
+    if ((request.slot != kUxnWaitAnySlot && request.slot >= kMaxUxnSlots) ||
+        request.timeoutMs == 0 || request.timeoutMs > kMaxUxnWaitTimeoutMs) {
+        return Result<UxnEvent>::failure(
+            ErrorCode::InvalidArgument,
+            "UXN wait requires slot 0-15 (or any) and timeout 1-60000 ms");
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<UxnEvent>(*error);
+    }
+    if (const auto error = requireKernelMemoryMode(context, true)) {
+        return failureFrom<UxnEvent>(*error);
+    }
+    const UxnWaitBackendResult backendResult = backend_.waitUxnBreakpoint(
+        context, request.slot, request.timeoutMs, request.lastSequence);
+    if (const auto failure = validateUxnIoResult<UxnEvent>(
+            context, backendResult, backend_, "wait", true)) {
+        return *failure;
+    }
+    const UxnEvent& event = backendResult.event;
+    if (event.slot >= kMaxUxnSlots ||
+        (request.slot != kUxnWaitAnySlot && event.slot != request.slot) ||
+        event.pid != static_cast<uint32_t>(context.target->pid) ||
+        event.tid == 0 || event.state != UxnState::Paused ||
+        event.sequence <= request.lastSequence || event.address == 0 ||
+        event.registers.programCounter == 0) {
+        return Result<UxnEvent>::failure(
+            ErrorCode::ProtocolError,
+            "UXN wait returned an inconsistent event");
+    }
+    if (const auto error = validateContext(context, true, true, false)) {
+        return Result<UxnEvent>::failure(
+            ErrorCode::CompletionUnknown,
+            "UXN wait returned a paused event after the original target changed");
+    }
+    return Result<UxnEvent>::success(backendResult.event);
+}
+
+Result<UxnMutationReceipt> MemService::resumeUxnBreakpoint(
+    const OperationContext& context,
+    const UxnResumeRequest& request) {
+    if (request.slot >= kMaxUxnSlots) {
+        return Result<UxnMutationReceipt>::failure(
+            ErrorCode::InvalidArgument, "UXN slot must be between 0 and 15");
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<UxnMutationReceipt>(*error);
+    }
+    if (const auto error = requireKernelMemoryMode(context, true)) {
+        return failureFrom<UxnMutationReceipt>(*error);
+    }
+    std::lock_guard<std::mutex> lock(uxnControlMutex_);
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<UxnMutationReceipt>(*error);
+    }
+    const UxnOperationBackendResult backendResult =
+        backend_.resumeUxnBreakpoint(
+            context, request.slot, request.writeRegisters, request.registers);
+    if (const auto failure = validateUxnIoResult<UxnMutationReceipt>(
+            context, backendResult, backend_, "resume", true)) {
+        return *failure;
+    }
+    if (const auto error = validateContext(context, true, true, false)) {
+        return Result<UxnMutationReceipt>::failure(
+            ErrorCode::CompletionUnknown,
+            "UXN resume completed after the original target changed");
+    }
+    return Result<UxnMutationReceipt>::success(
+        UxnMutationReceipt{request.slot, 0, *context.target});
+}
+
+Result<UxnStatus> MemService::queryUxnBreakpointStatus(
+    const OperationContext& context,
+    const UxnStatusRequest& request) {
+    if (request.slot >= kMaxUxnSlots) {
+        return Result<UxnStatus>::failure(
+            ErrorCode::InvalidArgument, "UXN slot must be between 0 and 15");
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<UxnStatus>(*error);
+    }
+    if (const auto error = requireKernelMemoryMode(context, true)) {
+        return failureFrom<UxnStatus>(*error);
+    }
+    std::lock_guard<std::mutex> lock(uxnControlMutex_);
+    const UxnStatusBackendResult backendResult =
+        backend_.queryUxnBreakpointStatus(context, request.slot);
+    if (const auto failure = validateUxnIoResult<UxnStatus>(
+            context, backendResult, backend_, "status", true)) {
+        return *failure;
+    }
+    const UxnStatus& status = backendResult.status;
+    if (status.slot != request.slot ||
+        static_cast<uint32_t>(status.state) >
+            static_cast<uint32_t>(UxnState::Stepping) ||
+        (status.used && status.pid !=
+             static_cast<uint32_t>(context.target->pid)) ||
+        (!status.used && status.state != UxnState::Empty)) {
+        return Result<UxnStatus>::failure(
+            ErrorCode::ProtocolError,
+            "UXN status response is inconsistent");
+    }
+    if (const auto error = validateContext(context, true, true, true)) {
+        return failureFrom<UxnStatus>(*error);
+    }
+    UxnStatus output = status;
+    output.target = *context.target;
+    return Result<UxnStatus>::success(std::move(output));
+}
+
+Result<UxnClearReceipt> MemService::clearUxnBreakpoints(
+    const OperationContext& context) {
+    if (const auto error = validateContext(context, true, false, true)) {
+        return failureFrom<UxnClearReceipt>(*error);
+    }
+    if (const auto error = requireKernelMemoryMode(context, false)) {
+        return failureFrom<UxnClearReceipt>(*error);
+    }
+    std::lock_guard<std::mutex> lock(uxnControlMutex_);
+    const UxnOperationBackendResult backendResult =
+        backend_.clearUxnBreakpoints(context);
+    if (const auto failure = validateUxnIoResult<UxnClearReceipt>(
+            context, backendResult, backend_, "clear", false)) {
+        return *failure;
+    }
+    if (const auto error = validateContext(context, true, false, false)) {
+        return Result<UxnClearReceipt>::failure(
+            ErrorCode::CompletionUnknown,
+            "UXN clear completed after the connection changed");
+    }
+    return Result<UxnClearReceipt>::success(
+        UxnClearReceipt{backend_.targetSnapshot()});
 }
 
 Result<SymbolTable> MemService::loadSymbolTable(

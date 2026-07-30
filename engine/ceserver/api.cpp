@@ -549,6 +549,20 @@ void CApi::CloseHandle(HANDLE h) {
 	} else if (ht == htProcesHandle) {
 		auto pOpenProcess = (CeOpenProcess*)pl;
 
+		std::vector<uint64_t> uxnAddresses;
+		{
+			std::lock_guard<std::mutex> lock(pOpenProcess->mUxnBpMutex);
+			uxnAddresses.reserve(pOpenProcess->mUxnBpList.size());
+			for (const auto& entry : pOpenProcess->mUxnBpList) {
+				uxnAddresses.push_back(entry.first);
+			}
+			pOpenProcess->mUxnBpList.clear();
+		}
+		for (uint64_t address : uxnAddresses) {
+			KernelDriver().RemoveUxnBreakpoint(
+				static_cast<uint32_t>(pOpenProcess->pid), address);
+		}
+
 		{
 			std::shared_lock<std::shared_mutex> rlock(g_globalMutex);
 			g_memIO->CloseHandle();
@@ -1133,6 +1147,175 @@ int CApi::ReadHwBpInfo(HANDLE hProcess,uint64_t hwaddr,uint64_t& nHitTotalCount,
 	}
 
 	return static_cast<int>(vOutput.size());
+}
+
+namespace {
+
+CeOpenProcess* GetUxnProcess(HANDLE hProcess, int& errorCode) {
+	if (CPortHelper::GetHandleType(hProcess) != htProcesHandle) {
+		errorCode = EBADF;
+		return nullptr;
+	}
+
+	const uint64_t pointer = CPortHelper::GetPointerFromHandle(hProcess);
+	auto* process = reinterpret_cast<CeOpenProcess*>(pointer);
+	if (!process || process->pid <= 0) {
+		errorCode = EBADF;
+		return nullptr;
+	}
+	return process;
+}
+
+bool IsUxnDriverReady(int& errorCode) {
+	std::shared_lock<std::shared_mutex> lock(g_globalMutex);
+	if (g_memIO->type != MemType_Kernel || !KernelDriver().IsConnected()) {
+		errorCode = ENODEV;
+		return false;
+	}
+	return true;
+}
+
+}  // namespace
+
+bool CApi::InstallUxnBreakpoint(HANDLE hProcess, uint64_t address,
+				uint32_t flags, ni_uxn_install& output,
+				int& errorCode) {
+	output = {};
+	errorCode = 0;
+	CeOpenProcess* process = GetUxnProcess(hProcess, errorCode);
+	if (!process || !IsUxnDriverReady(errorCode)) {
+		return false;
+	}
+	if (address == 0 || (address & 0x3) != 0 || flags != 0) {
+		errorCode = EINVAL;
+		return false;
+	}
+
+	output.pid = static_cast<uint32_t>(process->pid);
+	output.flags = flags;
+	output.addr = address;
+	const UxnOperationResult result = KernelDriver().InstallUxnBreakpoint(output);
+	if (!result.success) {
+		errorCode = result.errorCode;
+		return false;
+	}
+	if (output.pid != static_cast<uint32_t>(process->pid) ||
+	    output.addr != address || output.slot >= NI_UXN_MAX_SLOTS) {
+		KernelDriver().RemoveUxnBreakpoint(
+			static_cast<uint32_t>(process->pid), address);
+		output = {};
+		errorCode = EPROTO;
+		return false;
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(process->mUxnBpMutex);
+		process->mUxnBpList[address] = output.slot;
+	}
+	return true;
+}
+
+bool CApi::RemoveUxnBreakpoint(HANDLE hProcess, uint64_t address,
+			       int& errorCode) {
+	errorCode = 0;
+	CeOpenProcess* process = GetUxnProcess(hProcess, errorCode);
+	if (!process || !IsUxnDriverReady(errorCode)) {
+		return false;
+	}
+	if (address == 0 || (address & 0x3) != 0) {
+		errorCode = EINVAL;
+		return false;
+	}
+
+	const UxnOperationResult result = KernelDriver().RemoveUxnBreakpoint(
+		static_cast<uint32_t>(process->pid), address);
+	if (result.success || result.errorCode == ENOENT) {
+		std::lock_guard<std::mutex> lock(process->mUxnBpMutex);
+		process->mUxnBpList.erase(address);
+	}
+	if (!result.success) {
+		errorCode = result.errorCode;
+		return false;
+	}
+	return true;
+}
+
+bool CApi::WaitUxnBreakpoint(ni_uxn_wait& request, int& errorCode) {
+	errorCode = 0;
+	constexpr uint32_t kMaxWaitTimeoutMs = 60000;
+	if (request.timeout_ms == 0 || request.timeout_ms > kMaxWaitTimeoutMs ||
+	    (request.slot != NI_UXN_WAIT_ANY_SLOT &&
+	     request.slot >= NI_UXN_MAX_SLOTS)) {
+		errorCode = EINVAL;
+		return false;
+	}
+	if (!IsUxnDriverReady(errorCode)) {
+		return false;
+	}
+	const uint32_t requestedSlot = request.slot;
+	const uint64_t lastSequence = request.last_seq;
+	request.event = {};
+	const UxnOperationResult result = KernelDriver().WaitUxnBreakpoint(request);
+	if (!result.success) {
+		errorCode = result.errorCode;
+		return false;
+	}
+	if (request.event.slot >= NI_UXN_MAX_SLOTS ||
+	    (requestedSlot != NI_UXN_WAIT_ANY_SLOT &&
+	     request.event.slot != requestedSlot) ||
+	    request.event.pid == 0 || request.event.tid == 0 ||
+	    request.event.state != NI_UXN_STATE_PAUSED ||
+	    request.event.seq <= lastSequence || request.event.addr == 0 ||
+	    (request.event.addr & 0x3) != 0) {
+		request.event = {};
+		errorCode = EPROTO;
+		return false;
+	}
+	return true;
+}
+
+bool CApi::ResumeUxnBreakpoint(const ni_uxn_resume& request,
+			       int& errorCode) {
+	errorCode = 0;
+	if (!IsUxnDriverReady(errorCode)) {
+		return false;
+	}
+	const UxnOperationResult result = KernelDriver().ResumeUxnBreakpoint(request);
+	if (!result.success) {
+		errorCode = result.errorCode;
+		return false;
+	}
+	return true;
+}
+
+bool CApi::GetUxnBreakpointStatus(uint32_t slot, ni_uxn_status& status,
+				  int& errorCode) {
+	errorCode = 0;
+	status = {};
+	status.slot = slot;
+	if (!IsUxnDriverReady(errorCode)) {
+		return false;
+	}
+	const UxnOperationResult result =
+		KernelDriver().GetUxnBreakpointStatus(slot, status);
+	if (!result.success) {
+		errorCode = result.errorCode;
+		return false;
+	}
+	return true;
+}
+
+bool CApi::ClearUxnBreakpoints(int& errorCode) {
+	errorCode = 0;
+	if (!IsUxnDriverReady(errorCode)) {
+		return false;
+	}
+	const UxnOperationResult result = KernelDriver().ClearUxnBreakpoints();
+	if (!result.success) {
+		errorCode = result.errorCode;
+		return false;
+	}
+	return true;
 }
 
 bool CApi::QueryHardwareBreakpointThreads(

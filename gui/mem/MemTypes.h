@@ -315,6 +315,127 @@ struct BreakpointSlotsSnapshot {
     TargetSnapshot target;
 };
 
+enum class UxnState : uint32_t {
+    Empty = 0,
+    Armed = 1,
+    Paused = 2,
+    Stepping = 3,
+};
+
+struct UxnRegisters {
+    std::array<uint64_t, 31> general{};
+    uint64_t stackPointer = 0;
+    uint64_t programCounter = 0;
+    uint64_t pstate = 0;
+};
+
+struct UxnFpRegister {
+    uint64_t low = 0;
+    uint64_t high = 0;
+};
+
+struct UxnFpsimdRegisters {
+    std::array<UxnFpRegister, 32> vector{};
+    uint32_t fpsr = 0;
+    uint32_t fpcr = 0;
+    bool valid = false;
+};
+
+struct UxnOperationBackendResult {
+    bool requestStarted = false;
+    bool responseReceived = false;
+    bool applied = false;
+    int32_t errorCode = 0;
+};
+
+struct UxnInstallBackendResult : UxnOperationBackendResult {
+    uint32_t pid = 0;
+    uint32_t flags = 0;
+    uint64_t address = 0;
+    uint32_t slot = 0;
+};
+
+struct UxnEvent {
+    uint32_t slot = 0;
+    uint32_t pid = 0;
+    uint32_t tid = 0;
+    UxnState state = UxnState::Empty;
+    uint64_t sequence = 0;
+    uint64_t address = 0;
+    uint64_t page = 0;
+    uint64_t faultAddress = 0;
+    uint64_t esr = 0;
+    uint64_t hits = 0;
+    uint64_t falseHits = 0;
+    UxnRegisters registers;
+    UxnFpsimdRegisters fpsimd;
+};
+
+struct UxnWaitBackendResult : UxnOperationBackendResult {
+    UxnEvent event;
+};
+
+struct UxnStatus {
+    uint32_t slot = 0;
+    bool used = false;
+    uint32_t pid = 0;
+    uint32_t tid = 0;
+    UxnState state = UxnState::Empty;
+    int32_t lastError = 0;
+    uint64_t address = 0;
+    uint64_t page = 0;
+    uint64_t hits = 0;
+    uint64_t falseHits = 0;
+    uint64_t stepHits = 0;
+    uint64_t resumes = 0;
+    uint64_t sequence = 0;
+    TargetSnapshot target;
+};
+
+struct UxnStatusBackendResult : UxnOperationBackendResult {
+    UxnStatus status;
+};
+
+struct UxnInstallRequest {
+    uint64_t address = 0;
+};
+
+struct UxnInstallReceipt {
+    uint32_t slot = 0;
+    uint64_t address = 0;
+    TargetSnapshot target;
+};
+
+struct UxnRemoveRequest {
+    uint64_t address = 0;
+};
+
+struct UxnWaitRequest {
+    uint32_t slot = (std::numeric_limits<uint32_t>::max)();
+    uint32_t timeoutMs = 1000;
+    uint64_t lastSequence = 0;
+};
+
+struct UxnResumeRequest {
+    uint32_t slot = 0;
+    bool writeRegisters = false;
+    UxnRegisters registers;
+};
+
+struct UxnMutationReceipt {
+    uint32_t slot = 0;
+    uint64_t address = 0;
+    TargetSnapshot target;
+};
+
+struct UxnStatusRequest {
+    uint32_t slot = 0;
+};
+
+struct UxnClearReceipt {
+    TargetSnapshot target;
+};
+
 struct SymbolInfo {
     uint64_t address = 0;
     std::string name;
@@ -373,6 +494,10 @@ inline constexpr size_t kMaxSymbolNameBytesTotal = 64u * 1024u * 1024u;
 inline constexpr size_t kMaxBreakpointHitCount = 100000;
 inline constexpr uint32_t kMaxBreakpointQueryEntries = 64;
 inline constexpr size_t kMaxBreakpointQueryThreads = 65536;
+inline constexpr uint32_t kMaxUxnSlots = 16;
+inline constexpr uint32_t kUxnWaitAnySlot =
+    (std::numeric_limits<uint32_t>::max)();
+inline constexpr uint32_t kMaxUxnWaitTimeoutMs = 60000;
 inline constexpr size_t kMaxTextBytes = 4096;
 inline constexpr size_t kMaxDriverCardBytes = 4096;
 

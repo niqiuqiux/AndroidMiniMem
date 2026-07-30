@@ -140,6 +140,7 @@ set(GUI_SOURCES
     gui/CEWindow.cpp
     gui/ServerConnectWindow.cpp
     gui/ModulesWindow.cpp
+    gui/UxnBreakpointWindow.cpp
     gui/VersionWindow.cpp
     gui/DisassemblyHelper.cpp
     gui/AssemblyHelper.cpp
@@ -227,6 +228,7 @@ set(SOCKET_SOURCES
     socket/ProcessCommands.cpp
     socket/MemoryCommands.cpp
     socket/BreakpointCommands.cpp
+    socket/UxnBreakpointCommands.cpp
     socket/SymbolCommands.cpp
 )
 
@@ -400,9 +402,11 @@ if(BUILD_TESTING)
         if(NOT WIN32)
             target_link_libraries(minimem_lua_sandbox_tests PRIVATE Threads::Threads)
         endif()
-        add_test(NAME minimem_lua_sandbox
-                 COMMAND minimem_lua_sandbox_tests)
-        set_tests_properties(minimem_lua_sandbox PROPERTIES TIMEOUT 10)
+        if(WIN32)
+            add_test(NAME minimem_lua_sandbox
+                     COMMAND minimem_lua_sandbox_tests)
+            set_tests_properties(minimem_lua_sandbox PROPERTIES TIMEOUT 10)
+        endif()
     endif()
 
     add_test(

@@ -1,6 +1,6 @@
 ---
 name: minimem-mcp
-description: Operate MiniMem through its MCP server and reason about the MiniMem MCP bridge, including GUI and device status, Android process selection, module and pointer-chain resolution, targeted memory reads or writes, hardware breakpoints, Lua execution, and ELF symbol queries. Use for live MiniMem Android memory-debugging tasks or when editing or auditing the project's MCP integration; enforce workflow order, scope limits, parameter constraints, mutation authorization, and verification.
+description: Operate MiniMem through its MCP server and reason about the MiniMem MCP bridge, including GUI and device status, Android process selection, module and pointer-chain resolution, targeted memory reads or writes, hardware and UXN exception breakpoints, Lua execution, and ELF symbol queries. Use for live MiniMem Android memory-debugging tasks or when editing or auditing the project's MCP integration; enforce workflow order, scope limits, parameter constraints, mutation authorization, and verification.
 ---
 
 # MiniMem MCP
@@ -69,6 +69,40 @@ MiniMem intentionally has no value scanning, fuzzy scanning, pointer scanning, f
 - Use `suspend_breakpoint()` only for a deliberate short pause followed by `resume_breakpoint()`. Suspension is not cleanup and does not release the hardware slot; use `remove_breakpoint()` when observation has ended.
 - If removal fails or completion is ambiguous, call `get_status()`, report the address as potentially still installed, and do not claim cleanup succeeded or blindly repeat the mutation.
 - Use `query_hardware_breakpoint_slots()` to inspect per-thread Kernel hardware-breakpoint slots. It is read-only, requires GUI Kernel mode, and must be interpreted as a point-in-time snapshot; a failed TID query is not evidence that other thread results are invalid.
+
+### UXN Exception Breakpoints
+
+- UXN tools require GUI Kernel memory mode. If the service returns `permission_denied`, initialize or switch the driver from the GUI before trying again.
+- Use `install_uxn_breakpoint(address)` only with a non-zero, 4-byte-aligned ARM64 execution address observed for the selected target.
+- Call `wait_uxn_breakpoint(slot, timeout_ms, last_sequence)` once per desired event. It does not retry automatically. A successful return means the target thread is paused.
+- While an event is paused, inspect it promptly and then call `resume_uxn_breakpoint`, `remove_uxn_breakpoint`, or `clear_uxn_breakpoints`. Do not switch targets or begin unrelated work first.
+- Use `resume_uxn_breakpoint(slot, set_x0)` only to modify X0 from the most recent event cached by the same MCP process. The tool verifies that PID, slot state, and sequence still match before writing the full register context.
+- Use `query_uxn_breakpoint_status(slot)` for read-only state and statistics. State values are EMPTY, ARMED, PAUSED, and STEPPING.
+- Track each installed UXN address and slot. Remove temporary UXN breakpoints when finished; use `clear_uxn_breakpoints()` as recovery cleanup when ownership is uncertain or several slots must be released.
+- Treat timeout as “no newer event observed,” not proof that the breakpoint is absent. Treat ambiguous resume/remove/clear completion as potentially still paused and re-check connection and status before any retry.
+
+#### Default: One-Shot Read-Only Register Capture
+
+Unless the user explicitly requests a register modification, UXN inspection defaults to
+one read-only sample. Do not supply `set_x0` to `resume_uxn_breakpoint`, and do not
+send raw register data through the GUI IPC. The one-shot flow is:
+
+1. Call `get_status()` and `get_architecture()`; continue only with the already
+   selected target in Kernel mode.
+2. Derive a non-zero, 4-byte-aligned execution address from observed target data,
+   then call `install_uxn_breakpoint(address)` and record its returned slot.
+3. Call `wait_uxn_breakpoint(slot, timeout_ms, last_sequence=0)` exactly once.
+   On success, collect the returned PID, TID, sequence, PC/FAR/ESR, X0-X30, SP,
+   PSTATE, and FPSIMD validity as the single register snapshot.
+4. While the slot is `PAUSED`, call `resume_uxn_breakpoint(slot)` with no
+   `set_x0` argument. This only releases the thread; it does not write registers.
+5. Call `remove_uxn_breakpoint(address)` and confirm the recorded slot is `EMPTY`.
+
+If the wait times out, report that no sample was observed and remove the temporary
+breakpoint. If any step after a successful wait has an ambiguous result, first query
+the slot and then remove that address; use `clear_uxn_breakpoints()` only when the
+workflow owns every slot being cleared. Register writeback, including `set_x0`, is a
+separate mutation workflow and requires explicit user authorization.
 
 ### Symbols and Lua
 

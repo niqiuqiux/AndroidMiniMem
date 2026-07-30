@@ -55,6 +55,14 @@
 #define CMD_SETKERNELHWBPRECLAIM     22
 #define CMD_KERNEL_QUERYHWBPTHREADS  23
 
+// —— Kernel UXN 异常断点 ——
+#define CMD_KERNEL_UXN_INSTALL       24
+#define CMD_KERNEL_UXN_REMOVE        25
+#define CMD_KERNEL_UXN_WAIT          26
+#define CMD_KERNEL_UXN_RESUME        27
+#define CMD_KERNEL_UXN_STATUS        28
+#define CMD_KERNEL_UXN_CLEAR         29
+
 
 #pragma pack(1)
 struct CeVersion {
@@ -197,10 +205,113 @@ struct HwbpTaskSlot {
 };
 #pragma pack(pop)
 
+constexpr uint32_t CE_UXN_MAX_SLOTS = 16;
+constexpr uint32_t CE_UXN_WAIT_ANY_SLOT = UINT32_MAX;
+constexpr uint32_t CE_UXN_RESUME_SET_REGS = 1u << 0;
+constexpr uint32_t CE_UXN_FPSIMD_VALID = 1u << 0;
+
+enum CeUxnState : uint32_t {
+    CE_UXN_STATE_EMPTY = 0,
+    CE_UXN_STATE_ARMED = 1,
+    CE_UXN_STATE_PAUSED = 2,
+    CE_UXN_STATE_STEPPING = 3,
+};
+
+struct CeUxnResult {
+    int32_t result;
+    int32_t errorCode;
+};
+
+struct CeUxnRegisters {
+    uint64_t registers[31];
+    uint64_t stackPointer;
+    uint64_t programCounter;
+    uint64_t pstate;
+};
+
+struct CeUxnFpRegister {
+    uint64_t low;
+    uint64_t high;
+};
+
+struct CeUxnFpsimdRegisters {
+    CeUxnFpRegister registers[32];
+    uint32_t fpsr;
+    uint32_t fpcr;
+    uint32_t flags;
+    uint32_t reserved;
+};
+
+struct CeUxnInstall {
+    uint32_t pid;
+    uint32_t flags;
+    uint64_t address;
+    uint32_t slot;
+    uint32_t reserved;
+};
+
+struct CeUxnEvent {
+    uint32_t slot;
+    uint32_t pid;
+    uint32_t tid;
+    uint32_t state;
+    uint64_t sequence;
+    uint64_t address;
+    uint64_t page;
+    uint64_t faultAddress;
+    uint64_t esr;
+    uint64_t hits;
+    uint64_t falseHits;
+    CeUxnRegisters registers;
+    uint64_t fpsimdAlignmentPadding;
+    CeUxnFpsimdRegisters fpsimd;
+};
+
+struct CeUxnResume {
+    uint32_t slot;
+    uint32_t flags;
+    CeUxnRegisters registers;
+};
+
+struct CeUxnStatus {
+    uint32_t slot;
+    uint32_t used;
+    uint32_t pid;
+    uint32_t tid;
+    uint32_t state;
+    int32_t lastError;
+    uint64_t address;
+    uint64_t page;
+    uint64_t hits;
+    uint64_t falseHits;
+    uint64_t stepHits;
+    uint64_t resumes;
+    uint64_t sequence;
+};
+
 static_assert(sizeof(HwbpTaskThreadHeader) == 48,
               "HwbpTaskThreadHeader ABI size mismatch");
 static_assert(sizeof(HwbpTaskSlot) == 56,
               "HwbpTaskSlot ABI size mismatch");
+static_assert(sizeof(CeUxnResult) == 8, "CeUxnResult ABI size mismatch");
+static_assert(sizeof(CeUxnRegisters) == 272,
+              "CeUxnRegisters ABI size mismatch");
+static_assert(sizeof(CeUxnFpsimdRegisters) == 528,
+              "CeUxnFpsimdRegisters ABI size mismatch");
+static_assert(sizeof(CeUxnInstall) == 24,
+              "CeUxnInstall ABI size mismatch");
+static_assert(sizeof(CeUxnEvent) == 880,
+              "CeUxnEvent ABI size mismatch");
+static_assert(offsetof(CeUxnEvent, faultAddress) == 40,
+              "CeUxnEvent FAR offset mismatch");
+static_assert(offsetof(CeUxnEvent, registers) == 72,
+              "CeUxnEvent registers offset mismatch");
+static_assert(offsetof(CeUxnEvent, fpsimd) == 352,
+              "CeUxnEvent FPSIMD offset mismatch");
+static_assert(sizeof(CeUxnResume) == 280,
+              "CeUxnResume ABI size mismatch");
+static_assert(sizeof(CeUxnStatus) == 80,
+              "CeUxnStatus ABI size mismatch");
 
 #pragma pack()
 

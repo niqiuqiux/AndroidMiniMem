@@ -124,6 +124,16 @@ public:
     bool transactionValid = true;
     bool useBatchResultOverride = false;
     std::vector<Mem::MemoryBlock> batchResultOverride;
+    Mem::UxnOperationBackendResult uxnResult{true, true, true, 0};
+    Mem::UxnEvent uxnEvent;
+    Mem::UxnStatus uxnStatus;
+    int uxnInstallCalls = 0;
+    int uxnRemoveCalls = 0;
+    int uxnWaitCalls = 0;
+    int uxnResumeCalls = 0;
+    int uxnStatusCalls = 0;
+    int uxnClearCalls = 0;
+    Mem::UxnResumeRequest lastUxnResume;
 
     bool isConnected() const override { return connected; }
     bool isPoisoned() const override { return poisoned; }
@@ -325,6 +335,59 @@ public:
         if (changeGenerationAfterBreakpointSlotQuery)
             ++generation;
         return breakpointSlotFetchSucceeds;
+    }
+
+    Mem::UxnInstallBackendResult installUxnBreakpoint(
+        const Mem::OperationContext&, uint64_t address) override {
+        ++uxnInstallCalls;
+        Mem::UxnInstallBackendResult output;
+        static_cast<Mem::UxnOperationBackendResult&>(output) = uxnResult;
+        output.pid = static_cast<uint32_t>(target.pid);
+        output.address = address;
+        output.slot = 2;
+        return output;
+    }
+
+    Mem::UxnOperationBackendResult removeUxnBreakpoint(
+        const Mem::OperationContext&, uint64_t) override {
+        ++uxnRemoveCalls;
+        return uxnResult;
+    }
+
+    Mem::UxnWaitBackendResult waitUxnBreakpoint(
+        const Mem::OperationContext&, uint32_t, uint32_t,
+        uint64_t) override {
+        ++uxnWaitCalls;
+        Mem::UxnWaitBackendResult output;
+        static_cast<Mem::UxnOperationBackendResult&>(output) = uxnResult;
+        output.event = uxnEvent;
+        return output;
+    }
+
+    Mem::UxnOperationBackendResult resumeUxnBreakpoint(
+        const Mem::OperationContext&, uint32_t slot,
+        bool writeRegisters,
+        const Mem::UxnRegisters& registers) override {
+        ++uxnResumeCalls;
+        lastUxnResume.slot = slot;
+        lastUxnResume.writeRegisters = writeRegisters;
+        lastUxnResume.registers = registers;
+        return uxnResult;
+    }
+
+    Mem::UxnStatusBackendResult queryUxnBreakpointStatus(
+        const Mem::OperationContext&, uint32_t) override {
+        ++uxnStatusCalls;
+        Mem::UxnStatusBackendResult output;
+        static_cast<Mem::UxnOperationBackendResult&>(output) = uxnResult;
+        output.status = uxnStatus;
+        return output;
+    }
+
+    Mem::UxnOperationBackendResult clearUxnBreakpoints(
+        const Mem::OperationContext&) override {
+        ++uxnClearCalls;
+        return uxnResult;
     }
 };
 
@@ -955,6 +1018,120 @@ void testBreakpointSlotQuery() {
           "breakpoint slot query rejects a result from a replaced connection");
 }
 
+void testUxnBreakpointSemantics() {
+    FakeBackend backend;
+    Mem::MemService service(backend);
+    const auto context = service.captureContext(true);
+
+    const auto nonKernelInstall = service.installUxnBreakpoint(
+        context, Mem::UxnInstallRequest{0x6000});
+    const auto nonKernelRemove = service.removeUxnBreakpoint(
+        context, Mem::UxnRemoveRequest{0x6000});
+    const auto nonKernelWait = service.waitUxnBreakpoint(
+        context, Mem::UxnWaitRequest{2, 1000, 0});
+    const auto nonKernelResume = service.resumeUxnBreakpoint(
+        context, Mem::UxnResumeRequest{2});
+    const auto nonKernelStatus = service.queryUxnBreakpointStatus(
+        context, Mem::UxnStatusRequest{2});
+    const auto nonKernelClear = service.clearUxnBreakpoints(
+        service.captureContext(false));
+    check(!nonKernelInstall.ok() && !nonKernelRemove.ok() &&
+              !nonKernelWait.ok() && !nonKernelResume.ok() &&
+              !nonKernelStatus.ok() && !nonKernelClear.ok() &&
+              nonKernelInstall.error().code ==
+                  Mem::ErrorCode::PermissionDenied &&
+              nonKernelRemove.error().code ==
+                  Mem::ErrorCode::PermissionDenied &&
+              nonKernelWait.error().code ==
+                  Mem::ErrorCode::PermissionDenied &&
+              nonKernelResume.error().code ==
+                  Mem::ErrorCode::PermissionDenied &&
+              nonKernelStatus.error().code ==
+                  Mem::ErrorCode::PermissionDenied &&
+              nonKernelClear.error().code ==
+                  Mem::ErrorCode::PermissionDenied &&
+              backend.uxnInstallCalls == 0 &&
+              backend.uxnRemoveCalls == 0 &&
+              backend.uxnWaitCalls == 0 &&
+              backend.uxnResumeCalls == 0 &&
+              backend.uxnStatusCalls == 0 &&
+              backend.uxnClearCalls == 0,
+          "all UXN operations reject non-Kernel mode before backend access");
+
+    backend.memoryType = 3;
+
+    const auto unaligned = service.installUxnBreakpoint(
+        context, Mem::UxnInstallRequest{0x6002});
+    check(!unaligned.ok() &&
+              unaligned.error().code == Mem::ErrorCode::InvalidArgument &&
+              backend.uxnInstallCalls == 0,
+          "UXN install rejects unaligned addresses before backend access");
+
+    const auto installed = service.installUxnBreakpoint(
+        context, Mem::UxnInstallRequest{0x6000});
+    check(installed.ok() && installed.value().slot == 2 &&
+              installed.value().address == 0x6000 &&
+              installed.value().target == *context.target,
+          "UXN install returns the confirmed slot and target");
+
+    backend.uxnEvent.slot = 2;
+    backend.uxnEvent.pid = 42;
+    backend.uxnEvent.tid = 43;
+    backend.uxnEvent.state = Mem::UxnState::Paused;
+    backend.uxnEvent.sequence = 9;
+    backend.uxnEvent.address = 0x6000;
+    backend.uxnEvent.registers.programCounter = 0x6000;
+    const auto event = service.waitUxnBreakpoint(
+        context, Mem::UxnWaitRequest{2, 1000, 8});
+    check(event.ok() && event.value().sequence == 9 &&
+              event.value().registers.programCounter == 0x6000,
+          "UXN wait validates and returns a paused event");
+
+    Mem::UxnResumeRequest resume;
+    resume.slot = 2;
+    resume.writeRegisters = true;
+    resume.registers = event.value().registers;
+    resume.registers.general[0] = 0x1234;
+    const auto resumed = service.resumeUxnBreakpoint(context, resume);
+    check(resumed.ok() && backend.lastUxnResume.writeRegisters &&
+              backend.lastUxnResume.registers.general[0] == 0x1234,
+          "UXN resume preserves register writeback requests");
+
+    backend.uxnStatus.slot = 2;
+    backend.uxnStatus.used = true;
+    backend.uxnStatus.pid = 42;
+    backend.uxnStatus.state = Mem::UxnState::Armed;
+    backend.uxnStatus.address = 0x6000;
+    const auto status = service.queryUxnBreakpointStatus(
+        context, Mem::UxnStatusRequest{2});
+    check(status.ok() && status.value().used &&
+              status.value().state == Mem::UxnState::Armed &&
+              status.value().target == *context.target,
+          "UXN status preserves slot state and target");
+
+    backend.uxnResult = {true, true, false, 110};
+    const auto timedOut = service.waitUxnBreakpoint(
+        context, Mem::UxnWaitRequest{2, 1000, 9});
+    check(!timedOut.ok() &&
+              timedOut.error().code == Mem::ErrorCode::Timeout &&
+              timedOut.error().nativeCode == 110 &&
+              timedOut.error().retryable,
+          "UXN timeout preserves Linux errno and retryability");
+
+    backend.uxnResult = {true, false, false, 0};
+    const auto unknown = service.removeUxnBreakpoint(
+        context, Mem::UxnRemoveRequest{0x6000});
+    check(!unknown.ok() &&
+              unknown.error().code == Mem::ErrorCode::CompletionUnknown &&
+              !unknown.error().retryable,
+          "UXN mutation without a response is completion unknown");
+
+    backend.uxnResult = {true, true, true, 0};
+    const auto cleared = service.clearUxnBreakpoints(
+        service.captureContext(false));
+    check(cleared.ok(), "UXN clear does not require an attached target");
+}
+
 } // namespace
 
 int main() {
@@ -968,6 +1145,7 @@ int main() {
     testBreakpointCompletionSemantics();
     testProcessSymbolsAndBreakpoints();
     testBreakpointSlotQuery();
+    testUxnBreakpointSemantics();
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";
         return 1;

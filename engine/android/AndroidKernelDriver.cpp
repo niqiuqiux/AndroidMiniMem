@@ -30,6 +30,13 @@ size_t PageSizeOrDefault() {
     return pageSize > 0 ? static_cast<size_t>(pageSize) : 4096;
 }
 
+UxnOperationResult UxnResultFromCall(int result) {
+    UxnOperationResult operation;
+    operation.success = result == 0;
+    operation.errorCode = operation.success ? 0 : (errno != 0 ? errno : EIO);
+    return operation;
+}
+
 }  // namespace
 
 AndroidKernelDriver& KernelDriver() {
@@ -309,6 +316,7 @@ HardwareBreakpointInstallResult AndroidKernelDriver::AddHardwareBreakpoint(
     errno = 0;
     result.interfaceResult = d->hwbp_install(req);
     result.reclaimedSlots = req.reclaimed_slots;
+    result.blockedSlots = req.blocked_slots;
     if (result.interfaceResult != 0) {
         result.errorCode = errno != 0 ? errno : EIO;
         return result;
@@ -449,6 +457,120 @@ bool AndroidKernelDriver::ReadHardwareBreakpointInfo(uint64_t handle,
     total += newHits;
     totalHitCount = total;
     return true;
+}
+
+UxnOperationResult AndroidKernelDriver::InstallUxnBreakpoint(
+    ni_uxn_install& request) {
+    if (request.pid == 0 || request.addr == 0 || (request.addr & 0x3) != 0 ||
+        request.flags != 0) {
+        return {false, EINVAL};
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    NiDriver* driver = driverLocked();
+    if (!driver) {
+        return {false, ENODEV};
+    }
+
+    errno = 0;
+    UxnOperationResult result = UxnResultFromCall(driver->uxn_install(request));
+    if (result.success && request.slot >= NI_UXN_MAX_SLOTS) {
+        return {false, EPROTO};
+    }
+    return result;
+}
+
+UxnOperationResult AndroidKernelDriver::RemoveUxnBreakpoint(
+    uint32_t pid, uint64_t address) {
+    if (pid == 0 || address == 0 || (address & 0x3) != 0) {
+        return {false, EINVAL};
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    NiDriver* driver = driverLocked();
+    if (!driver) {
+        return {false, ENODEV};
+    }
+
+    errno = 0;
+    return UxnResultFromCall(driver->uxn_remove(pid, address));
+}
+
+UxnOperationResult AndroidKernelDriver::WaitUxnBreakpoint(
+    ni_uxn_wait& request) {
+    if (request.slot != NI_UXN_WAIT_ANY_SLOT &&
+        request.slot >= NI_UXN_MAX_SLOTS) {
+        return {false, EINVAL};
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!driverLocked()) {
+            return {false, ENODEV};
+        }
+    }
+
+    errno = 0;
+    NiDriver waitDriver;
+    if (!waitDriver.valid()) {
+        return {false, errno != 0 ? errno : ENODEV};
+    }
+    errno = 0;
+    return UxnResultFromCall(waitDriver.uxn_wait(request));
+}
+
+UxnOperationResult AndroidKernelDriver::ResumeUxnBreakpoint(
+    const ni_uxn_resume& request) {
+    if (request.slot >= NI_UXN_MAX_SLOTS ||
+        (request.flags & ~NI_UXN_RESUME_F_SET_REGS) != 0) {
+        return {false, EINVAL};
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    NiDriver* driver = driverLocked();
+    if (!driver) {
+        return {false, ENODEV};
+    }
+
+    errno = 0;
+    return UxnResultFromCall(driver->uxn_resume(request));
+}
+
+UxnOperationResult AndroidKernelDriver::GetUxnBreakpointStatus(
+    uint32_t slot, ni_uxn_status& status) {
+    status = {};
+    status.slot = slot;
+    if (slot >= NI_UXN_MAX_SLOTS) {
+        return {false, EINVAL};
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    NiDriver* driver = driverLocked();
+    if (!driver) {
+        return {false, ENODEV};
+    }
+
+    errno = 0;
+    auto queried = driver->uxn_get_status(slot);
+    if (!queried) {
+        return {false, errno != 0 ? errno : EIO};
+    }
+    if (queried->slot != slot || queried->state > NI_UXN_STATE_STEPPING) {
+        return {false, EPROTO};
+    }
+    status = *queried;
+    return {true, 0};
+}
+
+UxnOperationResult AndroidKernelDriver::ClearUxnBreakpoints() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    NiDriver* driver = driverLocked();
+    if (!driver) {
+        return {false, ENODEV};
+    }
+
+    errno = 0;
+    return UxnResultFromCall(driver->uxn_clear());
 }
 
 NiDriver* AndroidKernelDriver::driverLocked() {

@@ -18,6 +18,7 @@
 #include <mutex>
 
 #include "ScanProgress.hpp"
+#include "NiDriver.h"
 
 
 #define VQE_PAGEDONLY 1
@@ -164,9 +165,13 @@ struct CeOpenProcess {
  std::map<uint64_t, std::vector<uint64_t>> mHwBpList;
  std::mutex mHwBpMutex;
 
+ std::map<uint64_t, uint32_t> mUxnBpList;
+ std::mutex mUxnBpMutex;
+
  //构造函数
  CeOpenProcess() {
 	mHwBpList.clear();
+	mUxnBpList.clear();
 	libdl = 0;
 	dlopen = 0;
 	dlerror = 0;
@@ -267,6 +272,16 @@ public:
 	static bool QueryHardwareBreakpointThreads(
 		HANDLE hProcess, uint32_t capacity,
 		std::vector<HwbpTaskThreadInfo>& vOutput);
+	static bool InstallUxnBreakpoint(HANDLE hProcess, uint64_t address,
+		uint32_t flags, ni_uxn_install& output, int& errorCode);
+	static bool RemoveUxnBreakpoint(HANDLE hProcess, uint64_t address,
+		int& errorCode);
+	static bool WaitUxnBreakpoint(ni_uxn_wait& request, int& errorCode);
+	static bool ResumeUxnBreakpoint(const ni_uxn_resume& request,
+		int& errorCode);
+	static bool GetUxnBreakpointStatus(uint32_t slot, ni_uxn_status& status,
+		int& errorCode);
+	static bool ClearUxnBreakpoints(int& errorCode);
 
 
 // ELF 符号解析

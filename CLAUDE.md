@@ -7,14 +7,14 @@
 AndroidMiniMem 是一个**精简版** Android 远程内存调试工具，由 `android_mem_engine`（后端）与 `AMem`（前端）重构而来。三个子项目：
 
 - `engine/` — Android ARM64 设备端，CE 协议 socket 服务（C++23，需 NDK）
-- `gui/` — Windows 前端（C++17，ImGui + DX12），含内嵌 IPC 服务
+- `gui/` — 跨平台前端（C++17，ImGui），含内嵌 IPC 服务与 UXN 异常断点窗口
 - `mcp/` — Python MCP 服务，把 IPC 能力暴露给外部 AI 助手
 
 ## 核心约束：本项目"只做基础功能"
 
 **已被刻意移除**（不要重新引入）：数据搜索、指针扫描、冻结列表、SO 注入、内置 AI 聊天、GUI 的扫描/内存查看器/断点显示窗口。
 
-**保留**：进程/模块列表、内存读写（含批量）、硬件断点、内核切换（`init_driver`）、ELF 符号、指针偏移链解析、Lua 脚本引擎（用于复杂分析）。
+**保留**：进程/模块列表、内存读写（含批量）、硬件断点、UXN 异常断点、内核切换（`init_driver`）、ELF 符号、指针偏移链解析、Lua 脚本引擎（用于复杂分析）。
 
 ## 架构要点
 

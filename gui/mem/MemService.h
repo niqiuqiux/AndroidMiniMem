@@ -71,6 +71,23 @@ public:
     Result<BreakpointSlotsSnapshot> breakpointSlots(
         const OperationContext& context,
         uint32_t capacity = kMaxBreakpointQueryEntries) override;
+    Result<UxnInstallReceipt> installUxnBreakpoint(
+        const OperationContext& context,
+        const UxnInstallRequest& request) override;
+    Result<UxnMutationReceipt> removeUxnBreakpoint(
+        const OperationContext& context,
+        const UxnRemoveRequest& request) override;
+    Result<UxnEvent> waitUxnBreakpoint(
+        const OperationContext& context,
+        const UxnWaitRequest& request) override;
+    Result<UxnMutationReceipt> resumeUxnBreakpoint(
+        const OperationContext& context,
+        const UxnResumeRequest& request) override;
+    Result<UxnStatus> queryUxnBreakpointStatus(
+        const OperationContext& context,
+        const UxnStatusRequest& request) override;
+    Result<UxnClearReceipt> clearUxnBreakpoints(
+        const OperationContext& context) override;
     Result<SymbolTable> loadSymbolTable(
         const OperationContext& context,
         const SymbolTableRequest& request) override;
@@ -87,6 +104,9 @@ private:
         bool requireConnected,
         bool requireTarget,
         bool checkCancellation) const;
+    std::optional<Error> requireKernelMemoryMode(
+        const OperationContext& context,
+        bool requireTarget) const;
     Result<BreakpointMutationReceipt> mutateBreakpoint(
         const OperationContext& context,
         uint64_t address,
@@ -97,6 +117,7 @@ private:
     std::mutex connectionMutex_;
     std::mutex processMutex_;
     std::mutex breakpointMutex_;
+    std::mutex uxnControlMutex_;
     std::mutex symbolMutex_;
     TargetSnapshot breakpointCounterTarget_;
     std::unordered_map<uint64_t, size_t> breakpointHitTotals_;

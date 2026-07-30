@@ -103,6 +103,15 @@ int ClampIntCount(size_t count, const char *tag) {
   return static_cast<int>(count);
 }
 
+bool SendUxnResponse(Ioserver *IOserver, bool success, int errorCode,
+                     const void *payload, size_t payloadSize) {
+  const CeUxnResult result{success ? 1 : 0, success ? 0 : errorCode};
+  if (!IOserver->Send(&result, sizeof(result))) {
+    return false;
+  }
+  return payloadSize == 0 || IOserver->Send(payload, payloadSize);
+}
+
 }
 
 int DispatchCommand_V2(Ioserver *IOserver, unsigned char command) {
@@ -560,6 +569,103 @@ int DispatchCommand_V2(Ioserver *IOserver, unsigned char command) {
           return -1;
         }
       }
+    }
+    break;
+  }
+
+  case CMD_KERNEL_UXN_INSTALL: {
+    LOGD("CMD_KERNEL_UXN_INSTALL");
+    HANDLE handle = 0;
+    uint64_t address = 0;
+    uint32_t flags = 0;
+    if (!IOserver->Receive(&handle, sizeof(handle)) ||
+        !IOserver->Receive(&address, sizeof(address)) ||
+        !IOserver->Receive(&flags, sizeof(flags))) {
+      LOGEF("CMD_KERNEL_UXN_INSTALL: receive failed");
+      return -1;
+    }
+    ni_uxn_install install{};
+    int errorCode = 0;
+    const bool ok = CApi::InstallUxnBreakpoint(
+        handle, address, flags, install, errorCode);
+    if (!SendUxnResponse(IOserver, ok, errorCode, &install, sizeof(install))) {
+      return -1;
+    }
+    break;
+  }
+
+  case CMD_KERNEL_UXN_REMOVE: {
+    LOGD("CMD_KERNEL_UXN_REMOVE");
+    HANDLE handle = 0;
+    uint64_t address = 0;
+    if (!IOserver->Receive(&handle, sizeof(handle)) ||
+        !IOserver->Receive(&address, sizeof(address))) {
+      LOGEF("CMD_KERNEL_UXN_REMOVE: receive failed");
+      return -1;
+    }
+    int errorCode = 0;
+    const bool ok = CApi::RemoveUxnBreakpoint(handle, address, errorCode);
+    if (!SendUxnResponse(IOserver, ok, errorCode, nullptr, 0)) {
+      return -1;
+    }
+    break;
+  }
+
+  case CMD_KERNEL_UXN_WAIT: {
+    LOGD("CMD_KERNEL_UXN_WAIT");
+    ni_uxn_wait wait{};
+    if (!IOserver->Receive(&wait.slot, sizeof(wait.slot)) ||
+        !IOserver->Receive(&wait.timeout_ms, sizeof(wait.timeout_ms)) ||
+        !IOserver->Receive(&wait.last_seq, sizeof(wait.last_seq))) {
+      LOGEF("CMD_KERNEL_UXN_WAIT: receive failed");
+      return -1;
+    }
+    int errorCode = 0;
+    const bool ok = CApi::WaitUxnBreakpoint(wait, errorCode);
+    if (!SendUxnResponse(IOserver, ok, errorCode,
+                         &wait.event, sizeof(wait.event))) {
+      return -1;
+    }
+    break;
+  }
+
+  case CMD_KERNEL_UXN_RESUME: {
+    LOGD("CMD_KERNEL_UXN_RESUME");
+    ni_uxn_resume resume{};
+    if (!IOserver->Receive(&resume, sizeof(resume))) {
+      LOGEF("CMD_KERNEL_UXN_RESUME: receive failed");
+      return -1;
+    }
+    int errorCode = 0;
+    const bool ok = CApi::ResumeUxnBreakpoint(resume, errorCode);
+    if (!SendUxnResponse(IOserver, ok, errorCode, nullptr, 0)) {
+      return -1;
+    }
+    break;
+  }
+
+  case CMD_KERNEL_UXN_STATUS: {
+    LOGD("CMD_KERNEL_UXN_STATUS");
+    uint32_t slot = 0;
+    if (!IOserver->Receive(&slot, sizeof(slot))) {
+      LOGEF("CMD_KERNEL_UXN_STATUS: receive failed");
+      return -1;
+    }
+    ni_uxn_status status{};
+    int errorCode = 0;
+    const bool ok = CApi::GetUxnBreakpointStatus(slot, status, errorCode);
+    if (!SendUxnResponse(IOserver, ok, errorCode, &status, sizeof(status))) {
+      return -1;
+    }
+    break;
+  }
+
+  case CMD_KERNEL_UXN_CLEAR: {
+    LOGD("CMD_KERNEL_UXN_CLEAR");
+    int errorCode = 0;
+    const bool ok = CApi::ClearUxnBreakpoints(errorCode);
+    if (!SendUxnResponse(IOserver, ok, errorCode, nullptr, 0)) {
+      return -1;
     }
     break;
   }

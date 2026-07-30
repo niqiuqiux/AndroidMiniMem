@@ -74,6 +74,15 @@ enum NiHwbpCmd : uint8_t {
 	NI_CMD_HWBP_CLEANUP_TASK,
 };
 
+enum NiUxnCmd : uint8_t {
+	NI_CMD_UXN_INSTALL = 140,
+	NI_CMD_UXN_REMOVE,
+	NI_CMD_UXN_WAIT,
+	NI_CMD_UXN_RESUME,
+	NI_CMD_UXN_STATUS,
+	NI_CMD_UXN_CLEAR,
+};
+
 /* ── Map entry (matches kernel, packed) ─────────────────────────── */
 
 constexpr int NI_PATH_MAX = 1024;
@@ -176,7 +185,7 @@ struct ni_hwbp_install {
 	uint32_t type;
 	uint64_t handle;
 	uint32_t reclaimed_slots;
-	uint32_t reserved;
+	uint32_t blocked_slots;
 };
 
 struct ni_hwbp_handle_arg {
@@ -284,6 +293,122 @@ struct ni_hwbp_task_snapshot {
 	std::vector<ni_hwbp_task_entry> entries;
 };
 
+/* ── UXN exception breakpoints ─────────────────────────────────── */
+
+constexpr uint32_t NI_UXN_MAX_SLOTS = 16;
+constexpr uint32_t NI_UXN_REG_COUNT = 31;
+constexpr uint32_t NI_UXN_FP_REG_COUNT = 32;
+constexpr uint32_t NI_UXN_WAIT_ANY_SLOT = UINT32_MAX;
+constexpr size_t NI_UXN_REGS_SIZE = 272;
+constexpr size_t NI_UXN_FPSIMD_REGS_SIZE = 528;
+constexpr size_t NI_UXN_EVENT_SIZE = 880;
+constexpr size_t NI_UXN_WAIT_SIZE = 896;
+constexpr size_t NI_UXN_RESUME_SIZE = 280;
+
+enum NiUxnState : uint32_t {
+	NI_UXN_STATE_EMPTY = 0,
+	NI_UXN_STATE_ARMED,
+	NI_UXN_STATE_PAUSED,
+	NI_UXN_STATE_STEPPING,
+};
+
+enum NiUxnResumeFlags : uint32_t {
+	NI_UXN_RESUME_F_SET_REGS = 1u << 0,
+};
+
+enum NiUxnFpsimdFlags : uint32_t {
+	NI_UXN_REGS_F_FPSIMD_VALID = 1u << 0,
+};
+
+struct ni_uxn_regs {
+	uint64_t regs[NI_UXN_REG_COUNT];
+	uint64_t sp;
+	uint64_t pc;
+	uint64_t pstate;
+};
+
+struct ni_uxn_fpsimd_regs {
+	__uint128_t fp_regs[NI_UXN_FP_REG_COUNT];
+	uint32_t fpsr;
+	uint32_t fpcr;
+	uint32_t flags;
+	uint32_t reserved;
+};
+
+struct ni_uxn_install {
+	uint32_t pid;
+	uint32_t flags;
+	uint64_t addr;
+	uint32_t slot;
+	uint32_t reserved;
+};
+
+struct ni_uxn_remove {
+	uint32_t pid;
+	uint32_t reserved;
+	uint64_t addr;
+};
+
+struct ni_uxn_event {
+	uint32_t slot;
+	uint32_t pid;
+	uint32_t tid;
+	uint32_t state;
+	uint64_t seq;
+	uint64_t addr;
+	uint64_t page;
+	uint64_t fault_address;
+	uint64_t esr;
+	uint64_t hits;
+	uint64_t false_hits;
+	ni_uxn_regs regs;
+	ni_uxn_fpsimd_regs fpsimd;
+};
+
+struct ni_uxn_wait {
+	uint32_t slot;
+	uint32_t timeout_ms;
+	uint64_t last_seq;
+	ni_uxn_event event;
+};
+
+struct ni_uxn_resume {
+	uint32_t slot;
+	uint32_t flags;
+	ni_uxn_regs regs;
+};
+
+struct ni_uxn_status {
+	uint32_t slot;
+	uint32_t used;
+	uint32_t pid;
+	uint32_t tid;
+	uint32_t state;
+	int32_t last_error;
+	uint64_t addr;
+	uint64_t page;
+	uint64_t hits;
+	uint64_t false_hits;
+	uint64_t step_hits;
+	uint64_t resumes;
+	uint64_t seq;
+};
+
+static_assert(sizeof(ni_uxn_regs) == NI_UXN_REGS_SIZE,
+	      "ni_uxn_regs ABI size mismatch");
+static_assert(sizeof(ni_uxn_fpsimd_regs) == NI_UXN_FPSIMD_REGS_SIZE,
+	      "ni_uxn_fpsimd_regs ABI size mismatch");
+static_assert(sizeof(ni_uxn_install) == 24, "ni_uxn_install ABI size mismatch");
+static_assert(sizeof(ni_uxn_event) == NI_UXN_EVENT_SIZE,
+	      "ni_uxn_event ABI size mismatch");
+static_assert(offsetof(ni_uxn_event, fault_address) == 40,
+	      "ni_uxn_event FAR offset mismatch");
+static_assert(sizeof(ni_uxn_wait) == NI_UXN_WAIT_SIZE,
+	      "ni_uxn_wait ABI size mismatch");
+static_assert(sizeof(ni_uxn_resume) == NI_UXN_RESUME_SIZE,
+	      "ni_uxn_resume ABI size mismatch");
+static_assert(sizeof(ni_uxn_status) == 80, "ni_uxn_status ABI size mismatch");
+
 /* ══════════════════════════════════════════════════════════════════
  *  NiDriver — RAII wrapper
  * ══════════════════════════════════════════════════════════════════ */
@@ -378,6 +503,15 @@ public:
 						    uint32_t capacity,
 						    int timeout_ms,
 						    int interval_us = 1000);
+
+	/* ── UXN exception breakpoints ───────────────────────────── */
+
+	int uxn_install(ni_uxn_install &req);
+	int uxn_remove(uint32_t pid, uint64_t addr);
+	int uxn_wait(ni_uxn_wait &req);
+	int uxn_resume(const ni_uxn_resume &req);
+	std::optional<ni_uxn_status> uxn_get_status(uint32_t slot);
+	int uxn_clear();
 
 private:
 	int fd_;

@@ -6,6 +6,7 @@
 #include "../mem/IMemService.h"
 #include "ModulesWindow.h"
 #include "LogWindow.h"
+#include "UxnBreakpointWindow.h"
 
 #ifdef HAVE_LUAJIT
 #include "LuaScriptWindow.h"
@@ -80,6 +81,8 @@ void CEWindow::drawMenuBar()
                 openLuaScriptWindow();
             if (ImGui::MenuItem("模块列表"))
                 openModulesWindow();
+            if (ImGui::MenuItem("UXN 异常断点"))
+                openUxnBreakpointWindow();
             ImGui::Separator();
             if (ImGui::MenuItem("服务器连接"))
                 openServerConnectWindow();
@@ -241,7 +244,7 @@ void CEWindow::onDraw()
     ImGui::Text("当前进程: %s (PID: %d)", processName.c_str(), ctx.selectedPid.load());
     ImGui::Spacing();
 
-    ImGui::TextWrapped("精简版前端：仅提供 服务器连接 / 进程选择 / 模块列表 / 日志 / Lua 脚本。"
+    ImGui::TextWrapped("精简版前端：提供服务器连接 / 进程选择 / 模块列表 / UXN 异常断点 / 日志 / Lua 脚本。"
                        "内存读写、断点、ELF符号等能力通过 MCP (IPC 端口 28100) 对外提供。");
     ImGui::Spacing();
 
@@ -263,6 +266,10 @@ void CEWindow::onDraw()
     ImGui::SameLine();
     if (ImGui::Button("服务器连接", ImVec2(200, 40))) {
         openServerConnectWindow();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("UXN 异常断点", ImVec2(200, 40))) {
+        openUxnBreakpointWindow();
     }
 
     drawProcessSelectModal();
@@ -293,4 +300,9 @@ void CEWindow::openServerConnectWindow()
 void CEWindow::openLogWindow()
 {
     Gui::getOrCreate<LogWindow>();
+}
+
+void CEWindow::openUxnBreakpointWindow()
+{
+    Gui::getOrCreate<UxnBreakpointWindow>(service_);
 }

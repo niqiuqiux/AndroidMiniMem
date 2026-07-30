@@ -160,6 +160,35 @@ public:
         const Mem::OperationContext&, uint32_t) override {
         return unavailable<Mem::BreakpointSlotsSnapshot>();
     }
+    Mem::Result<Mem::UxnInstallReceipt> installUxnBreakpoint(
+        const Mem::OperationContext&,
+        const Mem::UxnInstallRequest&) override {
+        return unavailable<Mem::UxnInstallReceipt>();
+    }
+    Mem::Result<Mem::UxnMutationReceipt> removeUxnBreakpoint(
+        const Mem::OperationContext&,
+        const Mem::UxnRemoveRequest&) override {
+        return unavailable<Mem::UxnMutationReceipt>();
+    }
+    Mem::Result<Mem::UxnEvent> waitUxnBreakpoint(
+        const Mem::OperationContext&,
+        const Mem::UxnWaitRequest&) override {
+        return unavailable<Mem::UxnEvent>();
+    }
+    Mem::Result<Mem::UxnMutationReceipt> resumeUxnBreakpoint(
+        const Mem::OperationContext&,
+        const Mem::UxnResumeRequest&) override {
+        return unavailable<Mem::UxnMutationReceipt>();
+    }
+    Mem::Result<Mem::UxnStatus> queryUxnBreakpointStatus(
+        const Mem::OperationContext&,
+        const Mem::UxnStatusRequest&) override {
+        return unavailable<Mem::UxnStatus>();
+    }
+    Mem::Result<Mem::UxnClearReceipt> clearUxnBreakpoints(
+        const Mem::OperationContext&) override {
+        return unavailable<Mem::UxnClearReceipt>();
+    }
     Mem::Result<Mem::SymbolTable> loadSymbolTable(
         const Mem::OperationContext&,
         const Mem::SymbolTableRequest&) override {

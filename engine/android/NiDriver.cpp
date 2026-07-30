@@ -60,7 +60,7 @@ ssize_t NiDriver::cmd(uint8_t c, uint64_t p1, uint64_t p2, uint64_t p3,
 
 	ssize_t ret = ::read(fd_, pkt, total);
 
-	if (ret >= 0 && buf && buf_size > 0)
+	if (buf && buf_size > 0)
 		std::memcpy(buf, pkt + hdr_sz, buf_size);
 
 	if (pkt != stack)
@@ -499,4 +499,50 @@ std::vector<ni_hwbp_event> NiDriver::hwbp_poll_events(uint64_t handle,
 
 		::usleep(interval_us);
 	}
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  UXN exception breakpoints
+ * ══════════════════════════════════════════════════════════════════ */
+
+int NiDriver::uxn_install(ni_uxn_install &req)
+{
+	return static_cast<int>(cmd(NI_CMD_UXN_INSTALL, 0, 0, 0,
+				    &req, sizeof(req)));
+}
+
+int NiDriver::uxn_remove(uint32_t pid, uint64_t addr)
+{
+	ni_uxn_remove req{};
+	req.pid = pid;
+	req.addr = addr;
+	return static_cast<int>(cmd(NI_CMD_UXN_REMOVE, 0, 0, 0,
+				    &req, sizeof(req)));
+}
+
+int NiDriver::uxn_wait(ni_uxn_wait &req)
+{
+	return static_cast<int>(cmd(NI_CMD_UXN_WAIT, 0, 0, 0,
+				    &req, sizeof(req)));
+}
+
+int NiDriver::uxn_resume(const ni_uxn_resume &req)
+{
+	auto copy = req;
+	return static_cast<int>(cmd(NI_CMD_UXN_RESUME, 0, 0, 0,
+				    &copy, sizeof(copy)));
+}
+
+std::optional<ni_uxn_status> NiDriver::uxn_get_status(uint32_t slot)
+{
+	ni_uxn_status status{};
+	status.slot = slot;
+	if (cmd(NI_CMD_UXN_STATUS, 0, 0, 0, &status, sizeof(status)) < 0)
+		return std::nullopt;
+	return status;
+}
+
+int NiDriver::uxn_clear()
+{
+	return static_cast<int>(cmd(NI_CMD_UXN_CLEAR, 0, 0, 0, nullptr, 0));
 }

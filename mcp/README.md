@@ -296,6 +296,23 @@ VS Code 的 MCP 配置 key 是 `servers` 而不是 `mcpServers`。放置于项�
 | `suspend_breakpoint(address)` | — | 暂停断点（不删除） |
 | `resume_breakpoint(address)` | — | 恢复已暂停的断点 |
 
+### UXN 异常断点
+
+UXN 异常断点是 Kernel 内存模式专属功能，通过 ARM64 执行权限异常捕获精确执行地址，驱动全局最多 16 个槽位。
+命中后目标线程会保持暂停，必须及时恢复、移除断点或全局清理。
+
+| 工具 | 参数 | 说明 |
+|------|------|------|
+| `install_uxn_breakpoint(address)` | 地址非零且 4 字节对齐 | 安装 UXN 断点并返回槽位 |
+| `wait_uxn_breakpoint(slot, timeout_ms=1000, last_sequence=0)` | slot 0~15；超时 1~60000 ms | 等待命中并缓存完整通用/FPSIMD 寄存器，不自动重试 |
+| `resume_uxn_breakpoint(slot, set_x0=None)` | 可选写回 X0 | 恢复暂停线程；写回 X0 时校验并复用最近一次同槽位事件 |
+| `query_uxn_breakpoint_status(slot)` | slot 0~15 | 查询 EMPTY/ARMED/PAUSED/STEPPING 状态与统计 |
+| `remove_uxn_breakpoint(address)` | 安装时的地址 | 移除断点并释放可能暂停的线程 |
+| `clear_uxn_breakpoints()` | — | 清理全部 UXN 断点并释放所有暂停线程 |
+
+`wait_uxn_breakpoint` 命中后，在调用恢复或清理工具前不要开始无关操作或切换进程。
+若恢复时需要修改 X0，必须先由同一 MCP 进程成功调用 `wait_uxn_breakpoint`；工具会在写回前再次核对 PID、槽位状态和事件序号，拒绝陈旧寄存器。
+
 ### Lua 脚本
 
 | 工具 | 说明 |
@@ -333,6 +350,9 @@ VS Code 的 MCP 配置 key 是 `servers` 而不是 `mcpServers`。放置于项�
 8. write_value("0x7f1234", "999")        # 修改内存值
 9. set_breakpoint("0x7f1234", 2, 4)      # 设置写入断点 (2=写)
 10. read_breakpoint_info("0x7f1234")     # 查看谁修改了这个地址
+11. install_uxn_breakpoint("0x7f5678")   # 安装 UXN 执行异常断点
+12. wait_uxn_breakpoint(0, 1000, 0)      # 命中后线程暂停
+13. resume_uxn_breakpoint(0)             # 尽快恢复暂停线程
 ```
 
 ---

@@ -31,6 +31,12 @@ from ..ipc_client import IpcClient
 # 供 read_breakpoint_samples 钻取。engine 侧 read 是「拉取即清空」,故钻取只能基于此快照。
 _HIT_CACHE: dict[int, dict] = {}
 _SAMPLE_MAX = 50
+_UXN_EVENT_CACHE: dict[int, dict] = {}
+_UXN_INSTALL_CACHE: dict[int, int] = {}
+
+_U64_MAX = (1 << 64) - 1
+_UXN_MAX_SLOT = 15
+_UXN_MAX_TIMEOUT_MS = 60000
 
 _QUERY_TYPE_NAMES = {
     1: "read",
@@ -84,6 +90,36 @@ def _to_int(value) -> int:
     if isinstance(value, int):
         return value
     return int(str(value), 0)
+
+
+def _parse_u64(value, name: str) -> int:
+    parsed = parse_int(value)
+    if parsed > _U64_MAX:
+        raise ValueError(f"{name} must fit in an unsigned 64-bit integer")
+    return parsed
+
+
+def _parse_uxn_slot(slot: int) -> int:
+    parsed = parse_int(slot)
+    if parsed > _UXN_MAX_SLOT:
+        raise ValueError("slot must be between 0 and 15")
+    return parsed
+
+
+def _format_uxn_registers(registers: dict) -> list[str]:
+    general = registers.get("general") or []
+    lines = []
+    for index in range(0, min(len(general), 31), 4):
+        values = " ".join(
+            f"X{current}={general[current]}"
+            for current in range(index, min(index + 4, len(general)))
+        )
+        lines.append(f"  {values}")
+    lines.append(
+        f"  SP={registers.get('sp')} PC={registers.get('pc')} "
+        f"PSTATE={registers.get('pstate')}"
+    )
+    return lines
 
 
 def _reg(h: dict, i: int):
@@ -338,3 +374,191 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
         parse_int(address)
         ipc.call_or_raise("resume_breakpoint", {"address": address})
         return f"断点 {address} 已恢复"
+
+    @mcp.tool()
+    def install_uxn_breakpoint(address: str) -> str:
+        """安装 ARM64 UXN 执行异常断点。
+
+        地址必须非零且 4 字节对齐。命中后目标线程会暂停，必须调用
+        resume_uxn_breakpoint、remove_uxn_breakpoint 或 clear_uxn_breakpoints 释放。
+
+        Args:
+            address: 目标执行地址
+        """
+        parsed = _parse_u64(address, "address")
+        if parsed == 0 or parsed & 3:
+            raise ValueError("address must be non-zero and 4-byte aligned")
+        data = ipc.call_or_raise("uxn_install", {"address": address})
+        slot = _parse_uxn_slot(data.get("slot"))
+        _UXN_INSTALL_CACHE[parsed] = slot
+        return (
+            f"UXN 异常断点安装成功: PID={data.get('pid')} "
+            f"slot={slot} address={data.get('address')}"
+        )
+
+    @mcp.tool()
+    def wait_uxn_breakpoint(
+        slot: int,
+        timeout_ms: int = 1000,
+        last_sequence: str | int = 0,
+    ) -> str:
+        """等待一个 UXN 断点命中并缓存完整寄存器事件。
+
+        命中返回后目标线程保持暂停。本工具不会自动重试；检查事件后必须尽快恢复、
+        移除或清理。last_sequence 用于只等待更新的事件。
+
+        Args:
+            slot: UXN 槽位 0~15
+            timeout_ms: 等待时间 1~60000 毫秒
+            last_sequence: 已处理的最后事件序号
+        """
+        parsed_slot = _parse_uxn_slot(slot)
+        parsed_timeout = parse_int(timeout_ms)
+        if parsed_timeout < 1 or parsed_timeout > _UXN_MAX_TIMEOUT_MS:
+            raise ValueError("timeout_ms must be between 1 and 60000")
+        parsed_sequence = _parse_u64(last_sequence, "last_sequence")
+        data = ipc.call_or_raise(
+            "uxn_wait",
+            {
+                "slot": parsed_slot,
+                "timeout_ms": parsed_timeout,
+                "last_sequence": parsed_sequence,
+            },
+            retries=0,
+            timeout=parsed_timeout / 1000.0 + 10.0,
+        )
+        event_slot = _parse_uxn_slot(data.get("slot"))
+        registers = data.get("registers")
+        if event_slot != parsed_slot or not isinstance(registers, dict):
+            raise RuntimeError("GUI returned an inconsistent UXN event")
+        general = registers.get("general")
+        if not isinstance(general, list) or len(general) != 31:
+            raise RuntimeError("GUI returned an incomplete UXN register set")
+        _UXN_EVENT_CACHE[event_slot] = data
+        fpsimd = data.get("fpsimd") or {}
+        lines = [
+            "UXN 命中，目标线程当前处于暂停状态",
+            (
+                f"  PID={data.get('pid')} TID={data.get('tid')} "
+                f"slot={event_slot} state={data.get('state')}"
+            ),
+            (
+                f"  seq={data.get('sequence')} hits={data.get('hits')} "
+                f"false_hits={data.get('false_hits')}"
+            ),
+            (
+                f"  address={data.get('address')} page={data.get('page')} "
+                f"FAR={data.get('fault_address')} ESR={data.get('esr')}"
+            ),
+            f"  FPSIMD 有效={bool(fpsimd.get('valid'))}",
+            "通用寄存器:",
+        ]
+        lines.extend(_format_uxn_registers(registers))
+        lines.append(
+            f"下一步必须调用 resume_uxn_breakpoint(slot={event_slot})、"
+            "remove_uxn_breakpoint 或 clear_uxn_breakpoints"
+        )
+        return "\n".join(lines)
+
+    @mcp.tool()
+    def resume_uxn_breakpoint(slot: int, set_x0: str | int | None = None) -> str:
+        """恢复 UXN 命中线程，可选写回 X0。
+
+        set_x0 不为空时，使用最近一次 wait_uxn_breakpoint 缓存的完整寄存器组，
+        仅替换 X0 后写回；没有同槽位缓存时拒绝写回。
+
+        Args:
+            slot: UXN 槽位 0~15
+            set_x0: 可选的新 X0 值
+        """
+        parsed_slot = _parse_uxn_slot(slot)
+        params: dict = {"slot": parsed_slot}
+        wrote_x0 = set_x0 is not None
+        if wrote_x0:
+            cached = _UXN_EVENT_CACHE.get(parsed_slot)
+            if not cached:
+                raise ValueError(
+                    "no cached event for this slot; call wait_uxn_breakpoint first"
+                )
+            registers = cached.get("registers")
+            if not isinstance(registers, dict):
+                raise RuntimeError("cached UXN event has no register set")
+            general = list(registers.get("general") or [])
+            if len(general) != 31:
+                raise RuntimeError("cached UXN event has an incomplete register set")
+            status = ipc.call_or_raise(
+                "uxn_status", {"slot": parsed_slot}, retries=0
+            )
+            if (
+                not status.get("used")
+                or status.get("state") != 2
+                or status.get("pid") != cached.get("pid")
+                or status.get("sequence") != cached.get("sequence")
+            ):
+                raise RuntimeError(
+                    "cached UXN event no longer matches the paused slot; "
+                    "do not write stale registers"
+                )
+            general[0] = hex(_parse_u64(set_x0, "set_x0"))
+            params["registers"] = {
+                "general": general,
+                "sp": registers.get("sp"),
+                "pc": registers.get("pc"),
+                "pstate": registers.get("pstate"),
+            }
+        data = ipc.call_or_raise("uxn_resume", params, retries=0)
+        _UXN_EVENT_CACHE.pop(parsed_slot, None)
+        suffix = f"，X0 已写回为 {hex(_parse_u64(set_x0, 'set_x0'))}" if wrote_x0 else ""
+        return f"UXN slot={parsed_slot} 线程已恢复{suffix}"
+
+    @mcp.tool()
+    def query_uxn_breakpoint_status(slot: int) -> str:
+        """查询 UXN 槽位状态与统计，不改变目标状态。
+
+        Args:
+            slot: UXN 槽位 0~15
+        """
+        parsed_slot = _parse_uxn_slot(slot)
+        data = ipc.call_or_raise("uxn_status", {"slot": parsed_slot})
+        states = {0: "EMPTY", 1: "ARMED", 2: "PAUSED", 3: "STEPPING"}
+        state = data.get("state")
+        return (
+            f"UXN slot={parsed_slot} used={data.get('used')} "
+            f"state={states.get(state, 'UNKNOWN')}({state})\n"
+            f"  PID={data.get('pid')} TID={data.get('tid')} "
+            f"last_error={data.get('last_error')}\n"
+            f"  address={data.get('address')} page={data.get('page')}\n"
+            f"  hits={data.get('hits')} false_hits={data.get('false_hits')} "
+            f"step_hits={data.get('step_hits')} resumes={data.get('resumes')} "
+            f"seq={data.get('sequence')}"
+        )
+
+    @mcp.tool()
+    def remove_uxn_breakpoint(address: str) -> str:
+        """按地址移除 UXN 异常断点，并释放可能暂停的命中线程。
+
+        Args:
+            address: 安装 UXN 时使用的执行地址
+        """
+        parsed = _parse_u64(address, "address")
+        if parsed == 0 or parsed & 3:
+            raise ValueError("address must be non-zero and 4-byte aligned")
+        data = ipc.call_or_raise("uxn_remove", {"address": address}, retries=0)
+        slot = _UXN_INSTALL_CACHE.pop(parsed, None)
+        if slot is not None:
+            _UXN_EVENT_CACHE.pop(slot, None)
+        for event_slot, event in list(_UXN_EVENT_CACHE.items()):
+            if _to_int(event.get("address", 0)) == parsed:
+                _UXN_EVENT_CACHE.pop(event_slot, None)
+        return (
+            f"UXN 异常断点已移除: PID={data.get('pid')} "
+            f"address={data.get('address')}"
+        )
+
+    @mcp.tool()
+    def clear_uxn_breakpoints() -> str:
+        """清理驱动中的全部 UXN 断点并释放所有暂停线程。"""
+        data = ipc.call_or_raise("uxn_clear", retries=0)
+        _UXN_EVENT_CACHE.clear()
+        _UXN_INSTALL_CACHE.clear()
+        return f"全部 UXN 异常断点已清理（当前 PID={data.get('pid')}）"

@@ -26,6 +26,7 @@ constexpr uint64_t kMaxIpcBatchReadTotalBytes = Mem::kMaxMemoryBatchBytes;
 constexpr int kDefaultIpcLuaTimeoutSeconds = 30;
 constexpr int kMaxIpcLuaTimeoutSeconds = 30;
 constexpr int kDefaultIpcRequestTimeoutSeconds = 30;
+constexpr int kMaxIpcUxnWaitTimeoutSeconds = 70;
 constexpr size_t kMaxIpcStringParamBytes = 4096;
 constexpr size_t kMaxIpcLuaCodeBytes = 256 * 1024;
 constexpr size_t kMaxIpcOffsetChainLength = 1024;
@@ -229,6 +230,9 @@ json serviceFailure(const Mem::Error& error) {
     if (error.affectedBytes) {
         response["result"] = {{"written", *error.affectedBytes}};
     }
+    if (error.nativeCode) {
+        response["native_error_code"] = *error.nativeCode;
+    }
     return response;
 }
 
@@ -236,6 +240,75 @@ std::string formatAddress(uint64_t address) {
     std::ostringstream output;
     output << "0x" << std::hex << address;
     return output.str();
+}
+
+int requestTimeoutSeconds(const json& request) {
+    if (!request.is_object() || request.value("method", "") != "uxn_wait") {
+        return kDefaultIpcRequestTimeoutSeconds;
+    }
+    const auto params = request.find("params");
+    if (params == request.end() || !params->is_object()) {
+        return kDefaultIpcRequestTimeoutSeconds;
+    }
+    const auto timeout = params->find("timeout_ms");
+    if (timeout == params->end() ||
+        (!timeout->is_number_unsigned() && !timeout->is_number_integer())) {
+        return kDefaultIpcRequestTimeoutSeconds;
+    }
+    int64_t timeoutMs = timeout->is_number_unsigned()
+        ? static_cast<int64_t>((std::min)(
+              timeout->get<uint64_t>(),
+              static_cast<uint64_t>((std::numeric_limits<int64_t>::max)())))
+        : timeout->get<int64_t>();
+    if (timeoutMs <= 0) {
+        return kDefaultIpcRequestTimeoutSeconds;
+    }
+    return (std::min)(
+        kMaxIpcUxnWaitTimeoutSeconds,
+        static_cast<int>((timeoutMs + 999) / 1000) + 5);
+}
+
+json uxnRegistersJson(const Mem::UxnRegisters& registers) {
+    json general = json::array();
+    for (uint64_t value : registers.general) {
+        general.push_back(formatAddress(value));
+    }
+    return {
+        {"general", std::move(general)},
+        {"sp", formatAddress(registers.stackPointer)},
+        {"pc", formatAddress(registers.programCounter)},
+        {"pstate", formatAddress(registers.pstate)}
+    };
+}
+
+json uxnEventJson(const Mem::UxnEvent& event) {
+    json vectorRegisters = json::array();
+    for (const auto& value : event.fpsimd.vector) {
+        vectorRegisters.push_back({
+            {"low", formatAddress(value.low)},
+            {"high", formatAddress(value.high)}
+        });
+    }
+    return {
+        {"slot", event.slot},
+        {"pid", event.pid},
+        {"tid", event.tid},
+        {"state", static_cast<uint32_t>(event.state)},
+        {"sequence", event.sequence},
+        {"address", formatAddress(event.address)},
+        {"page", formatAddress(event.page)},
+        {"fault_address", formatAddress(event.faultAddress)},
+        {"esr", formatAddress(event.esr)},
+        {"hits", event.hits},
+        {"false_hits", event.falseHits},
+        {"registers", uxnRegistersJson(event.registers)},
+        {"fpsimd", {
+            {"valid", event.fpsimd.valid},
+            {"fpsr", formatAddress(event.fpsimd.fpsr)},
+            {"fpcr", formatAddress(event.fpsimd.fpcr)},
+            {"vector", std::move(vectorRegisters)}
+        }}
+    };
 }
 } // namespace
 
@@ -503,7 +576,7 @@ void IpcServer::HandleClient(uintptr_t clientSocket) {
     try {
         json request = json::parse(body);
         SocketIoTimeout::ScopedTimeout requestTimeout(
-            kDefaultIpcRequestTimeoutSeconds);
+            requestTimeoutSeconds(request));
         response = DispatchRequest(request);
     } catch (const json::parse_error& e) {
         statusCode = 400;
@@ -653,6 +726,38 @@ static uint64_t ParseAddress(const json& params, const std::string& key) {
         return static_cast<uint64_t>(parsed);
     }
     return v.get<uint64_t>();
+}
+
+static uint32_t ParseUxnSlot(const json& params,
+                             const std::string& key,
+                             uint32_t defaultValue) {
+    if (!params.contains(key)) {
+        return defaultValue;
+    }
+    const uint64_t value = ParseAddress(params, key);
+    if (value != Mem::kUxnWaitAnySlot && value >= Mem::kMaxUxnSlots) {
+        throw std::invalid_argument(
+            key + " must be 0-15 or 4294967295 for any slot");
+    }
+    return static_cast<uint32_t>(value);
+}
+
+static Mem::UxnRegisters ParseUxnRegisters(const json& value) {
+    if (!value.is_object() || !value.contains("general") ||
+        !value.at("general").is_array() ||
+        value.at("general").size() != 31) {
+        throw std::invalid_argument(
+            "registers.general must contain exactly 31 values");
+    }
+    Mem::UxnRegisters output;
+    for (size_t i = 0; i < output.general.size(); ++i) {
+        output.general[i] = ParseAddress(
+            json{{"value", value.at("general").at(i)}}, "value");
+    }
+    output.stackPointer = ParseAddress(value, "sp");
+    output.programCounter = ParseAddress(value, "pc");
+    output.pstate = ParseAddress(value, "pstate");
+    return output;
 }
 
 // ── 注册所有内置路由 ─────────────────────────────────────────────
@@ -997,6 +1102,107 @@ void IpcServer::RegisterBuiltinMethods() {
             {"threads", std::move(threadArray)}
         }}};
     });
+
+    // ── UXN 异常断点 ─────────────────────────────────────────────
+    RegisterMethod("uxn_install", [this](const json& p) -> json {
+        const uint64_t address = ParseAddress(p, "address");
+        auto result = service_->installUxnBreakpoint(
+            service_->captureContext(true), Mem::UxnInstallRequest{address});
+        if (!result.ok())
+            return serviceFailure(result.error());
+        return {{"success", true}, {"result", {
+            {"slot", result.value().slot},
+            {"address", formatAddress(result.value().address)},
+            {"pid", result.value().target.pid}
+        }}};
+    });
+
+    RegisterMethod("uxn_remove", [this](const json& p) -> json {
+        const uint64_t address = ParseAddress(p, "address");
+        auto result = service_->removeUxnBreakpoint(
+            service_->captureContext(true), Mem::UxnRemoveRequest{address});
+        if (!result.ok())
+            return serviceFailure(result.error());
+        return {{"success", true}, {"result", {
+            {"address", formatAddress(result.value().address)},
+            {"pid", result.value().target.pid}
+        }}};
+    });
+
+    RegisterMethod("uxn_wait", [this](const json& p) -> json {
+        Mem::UxnWaitRequest request;
+        request.slot = ParseUxnSlot(p, "slot", Mem::kUxnWaitAnySlot);
+        request.timeoutMs = getOptionalPositiveUintParam(
+            p, "timeout_ms", 1000, Mem::kMaxUxnWaitTimeoutMs);
+        if (p.contains("last_sequence")) {
+            request.lastSequence = ParseAddress(p, "last_sequence");
+        }
+        auto result = service_->waitUxnBreakpoint(
+            service_->captureContext(true), request);
+        if (!result.ok())
+            return serviceFailure(result.error());
+        return {{"success", true}, {"result", uxnEventJson(result.value())}};
+    });
+
+    RegisterMethod("uxn_resume", [this](const json& p) -> json {
+        Mem::UxnResumeRequest request;
+        request.slot = ParseUxnSlot(p, "slot", Mem::kUxnWaitAnySlot);
+        if (request.slot == Mem::kUxnWaitAnySlot) {
+            throw std::invalid_argument("slot is required for UXN resume");
+        }
+        if (p.contains("registers")) {
+            request.writeRegisters = true;
+            request.registers = ParseUxnRegisters(p.at("registers"));
+        }
+        auto result = service_->resumeUxnBreakpoint(
+            service_->captureContext(true), request);
+        if (!result.ok())
+            return serviceFailure(result.error());
+        return {{"success", true}, {"result", {
+            {"slot", result.value().slot},
+            {"pid", result.value().target.pid},
+            {"registers_written", request.writeRegisters}
+        }}};
+    });
+
+    RegisterMethod("uxn_status", [this](const json& p) -> json {
+        const uint32_t slot = ParseUxnSlot(
+            p, "slot", Mem::kUxnWaitAnySlot);
+        if (slot == Mem::kUxnWaitAnySlot) {
+            throw std::invalid_argument("slot is required for UXN status");
+        }
+        auto result = service_->queryUxnBreakpointStatus(
+            service_->captureContext(true), Mem::UxnStatusRequest{slot});
+        if (!result.ok())
+            return serviceFailure(result.error());
+        const auto& status = result.value();
+        return {{"success", true}, {"result", {
+            {"slot", status.slot},
+            {"used", status.used},
+            {"pid", status.pid},
+            {"tid", status.tid},
+            {"state", static_cast<uint32_t>(status.state)},
+            {"last_error", status.lastError},
+            {"address", formatAddress(status.address)},
+            {"page", formatAddress(status.page)},
+            {"hits", status.hits},
+            {"false_hits", status.falseHits},
+            {"step_hits", status.stepHits},
+            {"resumes", status.resumes},
+            {"sequence", status.sequence}
+        }}};
+    });
+
+    RegisterMethod("uxn_clear", [this](const json&) -> json {
+        auto result = service_->clearUxnBreakpoints(
+            service_->captureContext(false));
+        if (!result.ok())
+            return serviceFailure(result.error());
+        return {{"success", true}, {"result", {
+            {"pid", result.value().target.pid}
+        }}};
+    });
+
     // ── execute_lua ───────────────────────────────────────────────
 #ifdef HAVE_LUAJIT
     RegisterMethod("execute_lua", [this](const json& p) -> json {

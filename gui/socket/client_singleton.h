@@ -286,6 +286,39 @@ bool QueryKernelBreakpointThreads(
 bool ClearTrackedKernelBreakpoints(PortType type = PORT_MAIN);
 void ResetTrackedKernelBreakpoints();
 
+struct UxnOperationIoResult {
+  bool requestStarted = false;
+  bool responseReceived = false;
+  bool applied = false;
+  int32_t errorCode = 0;
+};
+
+struct UxnInstallIoResult : UxnOperationIoResult {
+  CeUxnInstall install{};
+};
+
+struct UxnWaitIoResult : UxnOperationIoResult {
+  CeUxnEvent event{};
+};
+
+struct UxnStatusIoResult : UxnOperationIoResult {
+  CeUxnStatus status{};
+};
+
+UxnInstallIoResult InstallUxnBreakpointTracked(
+    uint64_t address, uint32_t flags = 0, PortType type = PORT_MAIN);
+UxnOperationIoResult RemoveUxnBreakpointTracked(
+    uint64_t address, PortType type = PORT_MAIN);
+UxnWaitIoResult WaitUxnBreakpointTracked(
+    uint32_t slot, uint32_t timeoutMs, uint64_t lastSequence,
+    PortType type = PORT_DEBUG);
+UxnOperationIoResult ResumeUxnBreakpointTracked(
+    const CeUxnResume& request, PortType type = PORT_MAIN);
+UxnStatusIoResult QueryUxnBreakpointStatusTracked(
+    uint32_t slot, PortType type = PORT_MAIN);
+UxnOperationIoResult ClearUxnBreakpointsTracked(
+    PortType type = PORT_MAIN);
+
 // ELF 符号接口
 bool SymbolInit(uint64_t moduleBase, int &outTotalCount,
                 PortType type = PORT_MAIN);

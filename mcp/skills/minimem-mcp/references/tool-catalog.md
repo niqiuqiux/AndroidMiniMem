@@ -52,6 +52,21 @@ Breakpoint operations use addresses rather than handles. A summary distinguishes
 
 Track every successfully installed breakpoint address. Once no further hit data is needed, call `remove_breakpoint(address)` before switching targets, starting unrelated work, or ending the workflow. `suspend_breakpoint()` preserves the breakpoint and its hardware-slot usage, so it is only a temporary pause and does not satisfy cleanup. If removal has an ambiguous result, re-check status and report that the breakpoint may remain installed instead of claiming cleanup succeeded.
 
+## UXN Exception Breakpoints
+
+All UXN tools require the GUI to be in Kernel memory mode. The service rejects every UXN operation before device-command dispatch in other modes.
+
+| Tool | Behavior and constraints |
+| --- | --- |
+| `install_uxn_breakpoint(address)` | Install at a non-zero, 4-byte-aligned ARM64 execution address; returns a driver-global slot from 0 to 15. |
+| `wait_uxn_breakpoint(slot, timeout_ms=1000, last_sequence=0)` | Wait 1 to 60000 ms for a newer event. Never retries automatically. A successful result caches all X0-X30/SP/PC/PSTATE and FPSIMD data and leaves the target thread paused. |
+| `resume_uxn_breakpoint(slot, set_x0=None)` | Resume a paused slot. Optional X0 writeback requires a cached event and revalidates PID, PAUSED state, and sequence before sending its full general-register context. |
+| `query_uxn_breakpoint_status(slot)` | Read EMPTY/ARMED/PAUSED/STEPPING state, PID/TID, address, errno, sequence, and counters. Read-only and retryable at the HTTP bridge. |
+| `remove_uxn_breakpoint(address)` | Remove the address-owned UXN breakpoint, release a paused thread, and discard matching MCP cache entries. |
+| `clear_uxn_breakpoints()` | Clear all driver UXN slots, release all paused threads, and discard all MCP UXN caches. |
+
+Do not leave a successful wait unresolved. Resume, remove, or clear before switching targets or ending the workflow. A wait timeout only means no newer event arrived during that interval.
+
 ## Symbols
 
 | Tool | Behavior and constraints |
