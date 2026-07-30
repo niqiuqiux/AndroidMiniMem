@@ -108,7 +108,7 @@ MCP ▶ IPC ┘         │ 校验/目标快照/复合事务      │
 
 ## 5. 版本
 
-- 应用版本 / 协议版本分别为 **MiniMem 1.0.1 / 协议 1.0.0**：后端运行时版本串 `"MiniMem 1.0.1"` + 协议主版本字节 1；前端 `PROJECT_VERSION` / `PROTOCOL_VERSION`；MCP `minimem_mcp.__version__`（`pyproject.toml` 动态读取，单一真相源）。
+- 应用版本 / 协议版本分别为 **MiniMem 1.0.2 / 协议 1.0.2**：后端运行时版本串 `"MiniMem 1.0.2"` + 协议主版本字节 1；前端 `PROJECT_VERSION` / `PROTOCOL_VERSION`；MCP `minimem_mcp.__version__`（`pyproject.toml` 动态读取，单一真相源）。
 - `CMD_GETVERSION` 返回的版本字节即协议主版本，前端 `VersionWindow` 直接与 `PROTOCOL_VERSION_MAJOR` 比对。
 
 ---

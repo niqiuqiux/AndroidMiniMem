@@ -41,7 +41,7 @@ set(ANDROID_PLATFORM "android-26" CACHE STRING "Android API level")
 # 项目定义
 # ============================================================================
 project(android_minimem_engine
-    VERSION 1.0.1
+    VERSION 1.0.2
     LANGUAGES C CXX
     DESCRIPTION "Android MiniMem Engine (进程/模块/读写/断点/内核切换)"
 )

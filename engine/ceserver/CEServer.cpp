@@ -46,7 +46,7 @@ __attribute__((weak)) int g_stop_eventfd = -1;
 #define MAX_NETWORK_ARRAY_COUNT (10 * 1024 * 1024)   // 网络输入数组元素上限 10M
 
 
-char versionstring[] = "MiniMem 1.0.1";
+char versionstring[] = "MiniMem 1.0.2";
 char CheatEngineVersion = 1;  // 协议主版本号（与前端 PROTOCOL_VERSION_MAJOR 对齐）
 
 

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "minimem-mcp"
 dynamic = ["version"]
-description = "MiniMem MCP Server — 通过 HTTP 桥接 GUI 的 IPC Server，为 AI 助手暴露 Android 内存调试能力（MiniMem 1.0.1）"
+description = "MiniMem MCP Server — 通过 HTTP 桥接 GUI 的 IPC Server，为 AI 助手暴露 Android 内存调试能力（MiniMem 1.0.2）"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
