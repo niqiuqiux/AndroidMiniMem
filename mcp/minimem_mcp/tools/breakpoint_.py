@@ -122,6 +122,32 @@ def _format_uxn_registers(registers: dict) -> list[str]:
     return lines
 
 
+def _format_uxn_fpsimd(fpsimd: dict) -> list[str]:
+    if not fpsimd.get("valid"):
+        return ["FPSIMD: invalid"]
+
+    vector = fpsimd.get("vector")
+    if not isinstance(vector, list) or len(vector) != 32:
+        return ["FPSIMD: valid, but the register snapshot is incomplete"]
+
+    lines = [
+        f"FPSIMD: valid  FPSR={fpsimd.get('fpsr')} "
+        f"FPCR={fpsimd.get('fpcr')}"
+    ]
+    for index in range(0, len(vector), 2):
+        values = []
+        for current in range(index, min(index + 2, len(vector))):
+            value = vector[current]
+            if not isinstance(value, dict):
+                return ["FPSIMD: valid, but the register snapshot is malformed"]
+            values.append(
+                f"V{current}=0x{value.get('high', '0x0')[2:]}"
+                f"{value.get('low', '0x0')[2:]}"
+            )
+        lines.append("  " + "  ".join(values))
+    return lines
+
+
 def _reg(h: dict, i: int):
     """安全取第 i 个通用寄存器(X0..X30)，越界返回 None。"""
     regs = h.get("regs") or []
@@ -450,10 +476,11 @@ def register(mcp: FastMCP, ipc: IpcClient) -> None:
                 f"  address={data.get('address')} page={data.get('page')} "
                 f"FAR={data.get('fault_address')} ESR={data.get('esr')}"
             ),
-            f"  FPSIMD 有效={bool(fpsimd.get('valid'))}",
             "通用寄存器:",
         ]
         lines.extend(_format_uxn_registers(registers))
+        lines.append("FPSIMD 寄存器:")
+        lines.extend(_format_uxn_fpsimd(fpsimd))
         lines.append(
             f"下一步必须调用 resume_uxn_breakpoint(slot={event_slot})、"
             "remove_uxn_breakpoint 或 clear_uxn_breakpoints"
