@@ -129,7 +129,9 @@ struct ModuleInfoItem {
   uint64_t base = 0;
   int type; // 模块类型
   int flag; // 模块读写标志位
-  int size = 0;
+  // 线协议中的 modulesize 保持 4 字节布局，但内部按无符号值保存，
+  // 避免 2 GiB 以上的 Android 映射被解释成负数。
+  uint64_t size = 0;
   std::string name;
 };
 

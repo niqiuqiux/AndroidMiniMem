@@ -22,7 +22,7 @@
 | CMD_OPENPROCESS | 5 | 打开进程，返回句柄 | 参数: int pid；返回: int handle（0=失败） |
 | CMD_CLOSEHANDLE | 6 | 关闭句柄 | 参数: int handle；返回: int |
 | CMD_GETPROCESSLIST | 7 | 获取进程列表 | 返回: int 进程数 + N×(pid/名长 + 进程名) |
-| CMD_GETMODULELIST | 8 | 获取模块列表 | 返回: int 模块数 + N×(`CeModuleListEntry` + 模块名) |
+| CMD_GETMODULELIST | 8 | 获取模块列表 | 返回: int 模块数 + N×(`CeModuleListEntry` + 模块名)；`modulesize` 为无符号 32 位，超过范围时饱和为 `UINT32_MAX` |
 | CMD_READPROCESSMEMORY | 9 | 读进程内存（**连续前缀**，见 §3） | 参数: `CeReadProcessMemoryInput`；返回: int read + size 字节数据 |
 | CMD_WRITEPROCESSMEMORY | 10 | 写进程内存（**连续前缀**，见 §3） | 参数: `CeWriteProcessMemoryInput` + 数据；返回: `CeWriteProcessMemoryOutput`(int written) |
 | CMD_READBRATCHMEMORY | 11 | 批量读取（按页返回有效页，见 §3） | 参数: `CeReadBratchMemory`；返回: int 页数 + N×(u64 addr + 整页数据) |

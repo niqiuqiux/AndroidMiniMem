@@ -216,6 +216,7 @@ if(HAVE_LUAJIT)
         lua/LuaEngine.cpp
         lua/LuaAPI.cpp
         lua/LuaAPI_Memory.cpp
+        lua/LuaAPI_Uxn.cpp
         lua/LuaAPI_ImGui.cpp
         lua/LuaAPI_Assembly.cpp
     )

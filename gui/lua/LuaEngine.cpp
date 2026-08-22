@@ -544,7 +544,7 @@ LuaCaptureContext* PushIpcEnvironment(lua_State* state,
     }
 
     constexpr const char* kMiniMemApiTables[] = {
-        "mem", "process", "module", "bp", "asm",
+        "mem", "process", "module", "bp", "uxn", "asm",
     };
     for (const char* name : kMiniMemApiTables) {
         CopyGlobalTable(state, environmentIndex, name);

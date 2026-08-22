@@ -219,7 +219,7 @@ class MiniMemClient:
             result = []
             for _ in range(count):
                 data = self._recv_all(24)
-                mtype, mflag, mbase, msize, nlen = struct.unpack("<iiQii", data)
+                mtype, mflag, mbase, msize, nlen = struct.unpack("<iiQIi", data)
                 if nlen < 0:
                     raise RuntimeError(f"模块名长度非法: {nlen}")
                 name = self._recv_all(nlen).decode("utf-8", errors="replace") if nlen > 0 else ""

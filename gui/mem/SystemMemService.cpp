@@ -102,7 +102,7 @@ bool fetchSystemModules(std::vector<ModuleInfo>& modules) {
     for (auto& item : items) {
         ModuleInfo module;
         module.base = item.base;
-        module.size = item.size > 0 ? static_cast<uint64_t>(item.size) : 0;
+        module.size = item.size;
         module.type = item.type;
         module.flag = item.flag;
         module.name = std::move(item.name);

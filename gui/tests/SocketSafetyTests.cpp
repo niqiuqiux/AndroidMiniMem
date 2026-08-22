@@ -5,7 +5,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <iostream>
+#include <limits>
 #include <thread>
 
 namespace {
@@ -62,6 +64,18 @@ void testTimeoutScopes() {
                   SocketIoTimeout::GetRemainingTimeoutMs() <= 2000,
               "deadline-based timeout should expose remaining time");
     }
+}
+
+void testModuleEntryAbi() {
+    check(sizeof(CeModuleListEntry) == 24,
+          "module entry wire layout should remain 24 bytes");
+    CeModuleListEntry entry{};
+    entry.modulesize = 0x80000000u;
+    check(static_cast<uint64_t>(entry.modulesize) == 2147483648ull,
+          "module sizes with the high bit set must stay positive");
+    entry.modulesize = (std::numeric_limits<uint32_t>::max)();
+    check(static_cast<uint64_t>(entry.modulesize) == 4294967295ull,
+          "module size should preserve the full uint32 range");
 }
 
 void testSocketPoisoning() {
@@ -146,6 +160,7 @@ void testSocketPoisoning() {
 
 int main() {
     testTimeoutScopes();
+    testModuleEntryAbi();
     testSocketPoisoning();
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";

@@ -19,8 +19,14 @@ bool isValidCount(int value, int maxValue) {
     return value >= 0 && value <= maxValue;
 }
 
-bool isValidModuleSize(int value) {
-    return value > 0;
+uint64_t decodeModuleSize(uint32_t wireValue) {
+    // CeModuleListEntry.modulesize 是历史协议字段，在线布局为 4 字节。
+    // 必须按无符号值解码，不能把 2 GiB 以上映射的最高位当作符号位。
+    return static_cast<uint64_t>(wireValue);
+}
+
+bool isValidModuleSize(uint64_t value) {
+    return value != 0;
 }
 
 bool parseTimestampMs(const std::string& text, uint64_t& value) {
@@ -238,7 +244,8 @@ bool FetchModuleList(std::vector<ModuleInfoItem> &outList, PortType type) {
             std::memset(&entry, 0, sizeof(entry));
             if (!client->Receive(&entry, sizeof(entry)))
                 return false;
-            if (!isValidModuleSize(entry.modulesize) ||
+            const uint64_t moduleSize = decodeModuleSize(entry.modulesize);
+            if (!isValidModuleSize(moduleSize) ||
                 !isValidCount(entry.modulenamesize, kMaxModuleNameSize) ||
                 totalNameBytes > kMaxModuleNameBytesTotal -
                     static_cast<size_t>(entry.modulenamesize))
@@ -252,7 +259,7 @@ bool FetchModuleList(std::vector<ModuleInfoItem> &outList, PortType type) {
             }
             ModuleInfoItem mi{};
             mi.base = entry.modulebase;
-            mi.size = entry.modulesize;
+            mi.size = moduleSize;
             mi.type = entry.result;
             mi.flag = entry.flag;
             if (entry.modulenamesize > 0) {

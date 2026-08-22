@@ -74,9 +74,12 @@ struct CeModuleListEntry {
     int result;
     int flag;
     uint64_t modulebase;
-    int modulesize;
+    uint32_t modulesize;
     int modulenamesize;
 };
+
+static_assert(sizeof(CeModuleListEntry) == 24,
+              "CeModuleListEntry ABI size mismatch");
 
 struct CeReadProcessMemoryInput {
     uint32_t handle;

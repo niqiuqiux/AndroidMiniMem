@@ -2,6 +2,7 @@
 #include "LuaAPI_Memory.h"
 #include "LuaAPI_ImGui.h"
 #include "LuaAPI_Assembly.h"
+#include "LuaAPI_Uxn.h"
 #include "LuaDiagnostics.h"
 #include "../mem/IMemService.h"
 #include "../socket/socket_io_timeout.h"
@@ -293,6 +294,8 @@ void LuaAPI::RegisterAll(lua_State* L, Mem::IMemService& service) {
     RegisterTableFunction(L, "resume", ResumeBreakpoint, "bp.resume");
     RegisterTableFunction(L, "getInfo", GetBreakpointInfo, "bp.getInfo");
     lua_setglobal(L, "bp");
+
+    LuaAPI_Uxn::Register(L);
 
     // 全局函数
     PushProtectedFunction(L, Log, "log");

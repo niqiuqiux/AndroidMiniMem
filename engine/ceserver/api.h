@@ -108,7 +108,7 @@ struct ModuleListEntry {
 	int flag;
 	#endif
 	uint64_t baseAddress;
-	int moduleSize;
+	uint64_t moduleSize;
 	std::string moduleName;
 
 

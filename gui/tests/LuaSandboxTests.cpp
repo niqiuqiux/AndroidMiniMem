@@ -49,6 +49,9 @@ Mem::Result<T> unavailable() {
 
 class StubMemService final : public Mem::IMemService {
 public:
+    int uxnResumeCalls = 0;
+    Mem::UxnResumeRequest lastUxnResume;
+
     Mem::OperationContext captureContext(bool includeTarget) const override {
         Mem::OperationContext context;
         context.connectionGeneration = 1;
@@ -162,32 +165,80 @@ public:
     }
     Mem::Result<Mem::UxnInstallReceipt> installUxnBreakpoint(
         const Mem::OperationContext&,
-        const Mem::UxnInstallRequest&) override {
-        return unavailable<Mem::UxnInstallReceipt>();
+        const Mem::UxnInstallRequest& request) override {
+        return Mem::Result<Mem::UxnInstallReceipt>::success(
+            Mem::UxnInstallReceipt{3, request.address,
+                                   Mem::TargetSnapshot{42, 7, 1, 1}});
     }
     Mem::Result<Mem::UxnMutationReceipt> removeUxnBreakpoint(
         const Mem::OperationContext&,
-        const Mem::UxnRemoveRequest&) override {
-        return unavailable<Mem::UxnMutationReceipt>();
+        const Mem::UxnRemoveRequest& request) override {
+        return Mem::Result<Mem::UxnMutationReceipt>::success(
+            Mem::UxnMutationReceipt{0, request.address,
+                                    Mem::TargetSnapshot{42, 7, 1, 1}});
     }
     Mem::Result<Mem::UxnEvent> waitUxnBreakpoint(
         const Mem::OperationContext&,
-        const Mem::UxnWaitRequest&) override {
-        return unavailable<Mem::UxnEvent>();
+        const Mem::UxnWaitRequest& request) override {
+        Mem::UxnEvent event;
+        event.slot = request.slot;
+        event.pid = 42;
+        event.tid = 43;
+        event.state = Mem::UxnState::Paused;
+        event.sequence = 0x1000000000000001ull;
+        event.address = 0x72BDCCA000ull;
+        event.page = 0x72BDCC9000ull;
+        event.faultAddress = 0x71393F2A70ull;
+        event.esr = 0x96000004ull;
+        event.hits = 0x1000000000000002ull;
+        event.falseHits = 3;
+        for (size_t index = 0; index < event.registers.general.size(); ++index) {
+            event.registers.general[index] = 0xB400000000000000ull + index;
+        }
+        event.registers.stackPointer = 0x71393F2A70ull;
+        event.registers.programCounter = event.address;
+        event.registers.pstate = 0x60000000ull;
+        event.fpsimd.valid = true;
+        event.fpsimd.fpsr = 0x11;
+        event.fpsimd.fpcr = 0x22;
+        for (size_t index = 0; index < event.fpsimd.vector.size(); ++index) {
+            event.fpsimd.vector[index].low = 0x1000000000000000ull + index;
+            event.fpsimd.vector[index].high = 0x2000000000000000ull + index;
+        }
+        return Mem::Result<Mem::UxnEvent>::success(std::move(event));
     }
     Mem::Result<Mem::UxnMutationReceipt> resumeUxnBreakpoint(
         const Mem::OperationContext&,
-        const Mem::UxnResumeRequest&) override {
-        return unavailable<Mem::UxnMutationReceipt>();
+        const Mem::UxnResumeRequest& request) override {
+        ++uxnResumeCalls;
+        lastUxnResume = request;
+        return Mem::Result<Mem::UxnMutationReceipt>::success(
+            Mem::UxnMutationReceipt{request.slot, 0,
+                                    Mem::TargetSnapshot{42, 7, 1, 1}});
     }
     Mem::Result<Mem::UxnStatus> queryUxnBreakpointStatus(
         const Mem::OperationContext&,
-        const Mem::UxnStatusRequest&) override {
-        return unavailable<Mem::UxnStatus>();
+        const Mem::UxnStatusRequest& request) override {
+        Mem::UxnStatus status;
+        status.slot = request.slot;
+        status.used = true;
+        status.pid = 42;
+        status.tid = 43;
+        status.state = Mem::UxnState::Paused;
+        status.address = 0x72BDCCA000ull;
+        status.page = 0x72BDCC9000ull;
+        status.hits = 0x1000000000000002ull;
+        status.falseHits = 3;
+        status.stepHits = 4;
+        status.resumes = 5;
+        status.sequence = 0x1000000000000001ull;
+        status.target = Mem::TargetSnapshot{42, 7, 1, 1};
+        return Mem::Result<Mem::UxnStatus>::success(std::move(status));
     }
     Mem::Result<Mem::UxnClearReceipt> clearUxnBreakpoints(
         const Mem::OperationContext&) override {
-        return unavailable<Mem::UxnClearReceipt>();
+        return Mem::Result<Mem::UxnClearReceipt>::success(
+            Mem::UxnClearReceipt{Mem::TargetSnapshot{42, 7, 1, 1}});
     }
     Mem::Result<Mem::SymbolTable> loadSymbolTable(
         const Mem::OperationContext&,
@@ -231,6 +282,61 @@ void testSandboxAndCapture() {
     check(result.success, "IPC sandbox should execute safe Lua code");
     check(output == "sandbox\ttrue\t42\n",
           "IPC print output should be captured without changing globals");
+}
+
+void testUxnBindings(StubMemService& service) {
+    std::string output;
+    const LuaExecutionResult result = executeIpc(R"lua(
+        assert(type(uxn) == "table")
+        assert(type(uxn.install) == "function")
+        assert(type(uxn.remove) == "function")
+        assert(type(uxn.wait) == "function")
+        assert(type(uxn.resume) == "function")
+        assert(type(uxn.status) == "function")
+        assert(type(uxn.clear) == "function")
+
+        local installed = assert(uxn.install("0x72BDCCA000"))
+        assert(installed.slot == 3 and installed.pid == 42)
+        assert(installed.address == "0x00000072BDCCA000")
+
+        local event = assert(uxn.wait(installed.slot, 100, "0x0"))
+        assert(event.slot == 3 and event.pid == 42 and event.tid == 43)
+        assert(event.state == 2)
+        assert(event.sequence == "0x1000000000000001")
+        assert(event.registers.general[1] == "0xB400000000000000")
+        assert(event.registers.general[31] == "0xB40000000000001E")
+        assert(event.registers.sp == "0x00000071393F2A70")
+        assert(event.registers.pc == "0x00000072BDCCA000")
+        assert(event.fpsimd.valid == true)
+        assert(event.fpsimd.fpsr == "0x00000011")
+        assert(event.fpsimd.fpcr == "0x00000022")
+        assert(event.fpsimd.vector[1].low == "0x1000000000000000")
+        assert(event.fpsimd.vector[32].high == "0x200000000000001F")
+
+        local status = assert(uxn.status(installed.slot))
+        assert(status.used and status.state == 2)
+        assert(status.address == "0x00000072BDCCA000")
+        assert(status.hits == "0x1000000000000002")
+
+        local resumed = assert(uxn.resume(event.slot, event.registers))
+        assert(resumed.slot == 3 and resumed.pid == 42)
+        assert(resumed.registers_written == true)
+        local removed = assert(uxn.remove(installed.address))
+        assert(removed.address == installed.address)
+        assert(assert(uxn.clear()).pid == 42)
+        print("uxn", event.slot, event.fpsimd.vector[32].high)
+    )lua", output);
+    check(result.success,
+          "UXN Lua bindings should expose the complete paused-register event");
+    check(output == "uxn\t3\t0x200000000000001F\n",
+          "UXN Lua bindings should retain the full FPSIMD register values");
+    check(service.uxnResumeCalls == 1 &&
+              service.lastUxnResume.writeRegisters &&
+              service.lastUxnResume.registers.general[0] ==
+                  0xB400000000000000ull &&
+              service.lastUxnResume.registers.programCounter ==
+                  0x72BDCCA000ull,
+          "UXN Lua resume should write back the supplied general-register table");
 }
 
 void testEnvironmentIsolationAndCaptureLifetime() {
@@ -486,6 +592,7 @@ int main() {
     check(initialization.success, "Lua engine should initialize for tests");
     if (initialization.success) {
         testSandboxAndCapture();
+        testUxnBindings(service);
         testEnvironmentIsolationAndCaptureLifetime();
         testErrorStackCleanup();
         testLuaTracebackAndHostExceptionBoundary();

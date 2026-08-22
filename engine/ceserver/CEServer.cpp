@@ -103,6 +103,15 @@ int ClampIntCount(size_t count, const char *tag) {
   return static_cast<int>(count);
 }
 
+uint32_t ClampUint32Size(uint64_t size, const char *tag) {
+  if (size > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+    LOGEF("%s: size=%llu exceeds uint32 max, clamped", tag,
+          static_cast<unsigned long long>(size));
+    return std::numeric_limits<uint32_t>::max();
+  }
+  return static_cast<uint32_t>(size);
+}
+
 bool SendUxnResponse(Ioserver *IOserver, bool success, int errorCode,
                      const void *payload, size_t payloadSize) {
   const CeUxnResult result{success ? 1 : 0, success ? 0 : errorCode};
@@ -342,7 +351,8 @@ int DispatchCommand_V2(Ioserver *IOserver, unsigned char command) {
 
       memset(&e, 0, sizeof(e));
       e.modulebase = module.baseAddress;
-      e.modulesize = module.moduleSize;
+      e.modulesize = ClampUint32Size(module.moduleSize,
+                                     "CMD_GETMODULELIST.size");
       e.flag = module.flag;
       e.result = module.type;
       e.modulenamesize = ClampIntCount(module.moduleName.size(),

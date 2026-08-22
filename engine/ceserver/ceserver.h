@@ -105,10 +105,13 @@ struct CeModuleListEntry {
 	int result;       // 模块类型
 	int flag;         // 模块权限 1:读 2:写 4:执行 8:私有 16:共享
 	uint64_t modulebase;
-	int modulesize;
+	uint32_t modulesize;
 	int modulenamesize;
 	//modulename
 };
+
+static_assert(sizeof(CeModuleListEntry) == 24,
+	          "CeModuleListEntry ABI size mismatch");
 
 struct CeReadProcessMemoryInput {
 	uint32_t handle;
