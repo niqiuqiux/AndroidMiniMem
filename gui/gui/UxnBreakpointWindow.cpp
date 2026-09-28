@@ -43,7 +43,7 @@ UxnBreakpointWindow::~UxnBreakpointWindow() {
 }
 
 unsigned int UxnBreakpointWindow::getWindowFlags() const {
-    return ImGuiWindowFlags_NoDocking;
+    return ImGuiWindowFlags_None;
 }
 
 void UxnBreakpointWindow::draw() {

@@ -10,7 +10,7 @@ LogWindow::LogWindow() {
 
 unsigned int LogWindow::getWindowFlags() const
 {
-    return ImGuiWindowFlags_NoDocking;
+    return ImGuiWindowFlags_None;
 }
 
 namespace {

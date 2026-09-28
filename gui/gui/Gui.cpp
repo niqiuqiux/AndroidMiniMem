@@ -5,6 +5,7 @@
 #include "ModulesWindow.h"
 #include "LogWindow.h"
 #include "../imgui/imgui.h"
+#include "../imgui/imgui_internal.h"
 #include <exception>
 #include <functional>
 #include <map>
@@ -24,6 +25,36 @@ namespace Gui {
 		std::mutex tasksMutex;
 		std::vector<std::function<void()>> pendingTasks;
 		std::thread::id guiThreadId;
+		bool exitRequested = false;
+
+		bool drawDockSpace()
+		{
+			if (!(ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_DockingEnable)) {
+				return false;
+			}
+			const ImGuiViewport* viewport = ImGui::GetMainViewport();
+			const ImGuiID dockspaceId = ImGui::GetID("MiniMemDockSpace");
+			// 仅在没有保存的停靠布局时建立默认布局，保留用户的拆分和拖出状态。
+			const bool createLayout = ImGui::DockBuilderGetNode(dockspaceId) == nullptr;
+			if (createLayout) {
+				ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
+				ImGui::DockBuilderSetNodeSize(dockspaceId, viewport->WorkSize);
+				ImGuiID center = dockspaceId;
+				const ImGuiID left = ImGui::DockBuilderSplitNode(
+					center, ImGuiDir_Left, 0.28f, nullptr, &center);
+				const ImGuiID bottom = ImGui::DockBuilderSplitNode(
+					center, ImGuiDir_Down, 0.25f, nullptr, &center);
+				ImGui::DockBuilderDockWindow("服务器连接", left);
+				ImGui::DockBuilderDockWindow("MiniMem", center);
+				ImGui::DockBuilderDockWindow("日志", bottom);
+#ifdef HAVE_LUAJIT
+				ImGui::DockBuilderDockWindow("Lua脚本管理器", center);
+#endif
+				ImGui::DockBuilderFinish(dockspaceId);
+			}
+			ImGui::DockSpaceOverViewport(dockspaceId, viewport);
+			return createLayout;
+		}
 
 		void runPendingTasks()
 		{
@@ -82,6 +113,11 @@ namespace Gui {
 		windows.emplace_back(window);
 	}
 
+	void requestExit()
+	{
+		exitRequested = true;
+	}
+
 	bool mainLoop(Mem::IMemService& service)
 	{
 		{
@@ -105,6 +141,8 @@ namespace Gui {
 			bootstrapped = true;
 		}
 
+		const bool defaultLayoutCreated = drawDockSpace();
+
 		bool hasOpenWindow = false;
 		for (auto it = windows.begin(); it != windows.end(); ++it)
 		{
@@ -118,7 +156,10 @@ namespace Gui {
 				hasOpenWindow = hasOpenWindow || w->pOpen;
 			}
 		}
-		return hasOpenWindow;
+		if (defaultLayoutCreated) {
+			ImGui::SetWindowFocus("MiniMem");
+		}
+		return !exitRequested && hasOpenWindow;
 	}
 
 	void shutdown()

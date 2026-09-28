@@ -13,7 +13,7 @@ VersionWindow::VersionWindow(Mem::IMemService& service)
 
 unsigned int VersionWindow::getWindowFlags() const
 {
-    return ImGuiWindowFlags_NoDocking;
+    return ImGuiWindowFlags_None;
 }
 
 void VersionWindow::onDraw()

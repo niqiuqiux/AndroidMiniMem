@@ -8,6 +8,7 @@
 #include "../imgui/backends/imgui_impl_opengl3.h"
 
 #include <cstdio>
+#include <cstdlib>
 
 #define GL_SILENCE_DEPRECATION
 #include <GLFW/glfw3.h>
@@ -37,7 +38,21 @@ struct AppWindow::Impl {
 
     bool init(const char* title, int width, int height) {
         glfwSetErrorCallback(glfwErrorCallback);
-        if (!glfwInit()) {
+        bool initialized = false;
+#if defined(__linux__) && (GLFW_VERSION_MAJOR > 3 || (GLFW_VERSION_MAJOR == 3 && GLFW_VERSION_MINOR >= 4))
+        // ImGui 的 GLFW 后端在原生 Wayland 下不支持多视口。
+        // 有 X11/XWayland 时优先使用它，才能把面板拖出主窗口。
+        const char* display = std::getenv("DISPLAY");
+        if (display != nullptr && display[0] != '\0' &&
+            glfwPlatformSupported(GLFW_PLATFORM_X11)) {
+            glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
+            initialized = glfwInit() == GLFW_TRUE;
+            if (!initialized) {
+                glfwInitHint(GLFW_PLATFORM, GLFW_ANY_PLATFORM);
+            }
+        }
+#endif
+        if (!initialized && !glfwInit()) {
             return false;
         }
 
@@ -77,8 +92,13 @@ struct AppWindow::Impl {
         ImGuiIO& io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
-        io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+#if defined(__linux__)
+        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+        io.ConfigViewportsNoAutoMerge = false;
+#else
         io.ConfigViewportsNoAutoMerge = true;
+#endif
+        io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
         io.ConfigViewportsNoTaskBarIcon = false;
         ImGui::StyleColorsDark();
 
@@ -86,6 +106,11 @@ struct AppWindow::Impl {
 
         ImGui_ImplGlfw_InitForOpenGL(window, true);
         ImGui_ImplOpenGL3_Init(glslVersion);
+
+        // 纯 Wayland 环境保留主窗口内的 docking，避免启用不受支持的多视口。
+        if (!(io.BackendFlags & ImGuiBackendFlags_PlatformHasViewports)) {
+            io.ConfigFlags &= ~ImGuiConfigFlags_ViewportsEnable;
+        }
 
         StyleSetup::loadFonts(io);
         return true;

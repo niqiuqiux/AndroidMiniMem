@@ -12,7 +12,7 @@ public:
 	~ServerConnectWindow() override = default;
 
 	void onDraw() override;
-	unsigned int getWindowFlags() const override { return ImGuiWindowFlags_NoDocking; }
+	unsigned int getWindowFlags() const override { return ImGuiWindowFlags_None; }
 
 	std::function<void()> onConnected; // callback after successful connect
 

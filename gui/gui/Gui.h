@@ -19,6 +19,7 @@ namespace Gui {
 	extern std::mutex logsMutex;
 
 	bool mainLoop(Mem::IMemService& service);
+	void requestExit();
 	void shutdown();
 	void postTask(std::function<void()> task);
 	std::vector<std::pair<std::string, int>> getLogsSnapshot();

@@ -37,7 +37,7 @@ enum _ModuleType {
 
 unsigned int ModulesWindow::getWindowFlags() const
 {
-    return ImGuiWindowFlags_NoDocking;
+    return ImGuiWindowFlags_None;
 }
 
 ModulesWindow::ModulesWindow(Mem::IMemService& service)

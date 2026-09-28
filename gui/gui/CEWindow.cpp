@@ -61,7 +61,7 @@ CEWindow::CEWindow(Mem::IMemService& service)
 
 unsigned int CEWindow::getWindowFlags() const
 {
-    return ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking;
+    return ImGuiWindowFlags_MenuBar;
 }
 
 void CEWindow::drawMenuBar()
@@ -72,7 +72,8 @@ void CEWindow::drawMenuBar()
         {
             if (ImGui::MenuItem("打开进程", "Ctrl+P"))
                 openProcessModal = true;
-            ImGui::MenuItem("退出", nullptr, false);
+            if (ImGui::MenuItem("退出"))
+                Gui::requestExit();
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("窗口"))

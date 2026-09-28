@@ -17,7 +17,7 @@ LuaScriptWindow::LuaScriptWindow(Mem::IMemService& service)
 
 unsigned int LuaScriptWindow::getWindowFlags() const
 {
-    return ImGuiWindowFlags_NoDocking;
+    return ImGuiWindowFlags_None;
 }
 
 LuaScriptWindow::~LuaScriptWindow() {

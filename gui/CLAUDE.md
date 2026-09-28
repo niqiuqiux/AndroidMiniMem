@@ -11,6 +11,8 @@ cmake --build build
 
 Windows 产物 `bin/MiniMemClient.exe`，依赖 DirectX 12 SDK、Windows SDK。Linux 依赖 OpenGL 与 GLFW3 开发包，例如 Debian/Ubuntu 上安装 `libgl1-mesa-dev libglfw3-dev`。LuaJIT 使用 OpenResty luajit2（Ubuntu 包：`libluajit2-5.1-dev luajit2`；pkg-config 名称仍是 `luajit`）；缺失时 Lua 窗口与 Lua IPC 方法禁用。可选：Capstone（反汇编）、Keystone（汇编）——供 Lua 汇编 API 使用，缺失则相应功能禁用；Linux 下 CMake 默认从 `third_party/keystone-linux` 查找 Keystone。`third_party/nlohmann/json.hpp` 供 IPC 使用。
 
+Linux 默认在主窗口内建立可保存的停靠布局。GLFW 3.4+ 在 `DISPLAY` 可用时优先使用 X11/XWayland，支持把面板拖出为独立窗口；原生 Wayland 的 ImGui GLFW 后端不支持多视口，此时保留窗口内停靠。Windows 继续使用原有的 Win32/DX12 独立窗口模式。主控制面板的「文件 → 退出」会退出整个应用。
+
 ## 架构
 
 - `main.cpp` — 平台无关入口，创建 `renderer/AppWindow`，运行 `Gui::mainLoop()`，启动 IPC 服务（28100 端口）。
